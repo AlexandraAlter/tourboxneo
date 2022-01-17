@@ -1,0 +1,8 @@
+[Unit]
+Description=TourBox NEO
+
+[Service]
+ExecStart=/usr/bin/tourboxneo
+
+[Install]
+WantedBy=default.target
