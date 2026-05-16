@@ -1,0 +1,23 @@
+[package]
+name = "tourboxneo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bitflags = "2.11.1"
+evdev = "0.13.2"
+log = "0.4.29"
+mio = "1"
+mio-serial = "5.0.1"
+num_enum = "0.7.6"
+stderrlog = "0.6.0"
+tempfile = "3.27.0"
+toml = "1.1.0"
+wayland-client = "0.31.14"
+wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+xkbcommon = "0.9.0"
+
+[dependencies.clap]
+version = "4.6.0"
+features = ["derive"]

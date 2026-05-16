@@ -35,3 +35,8 @@ MANIFEST
 # ignore pidfile
 tourboxneo.pid
 
+
+
+# Added by cargo
+
+/target
