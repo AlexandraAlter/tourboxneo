@@ -396,25 +396,45 @@ impl Engine {
 
     fn handle_input(&mut self, input: Input) {
         info!("Input {:?}", input);
+        if !input.release {
+            self.held_buttons.push(input.code);
+        } else {
+            self.held_buttons.retain(|c| *c != input.code);
+        }
         let bind = self.code_to_bind(input.code);
         if bind.is_none() {
             return;
         }
         match bind.unwrap().as_ref() {
-            Bind::Button { cmd, up, rep } => {
-                if *up && input.release {
-                    self.action_down(cmd);
-                    self.action_up(cmd);
-                } else if input.release {
-                    self.action_up(cmd);
-                    if *rep {
-                        self.timer.disarm().unwrap();
-                    }
+            Bind::Button(action) => {
+                if !input.release {
+                    self.action_down(action);
                 } else {
-                    self.action_down(cmd);
-                    if *rep {
-                        self.timer.set_timeout(&Duration::from_millis(100)).unwrap();
-                    }
+                    self.action_up(action);
+                }
+            }
+            Bind::ButtonUp(action) => {
+                if input.release {
+                    self.action_down(action);
+                    self.action_up(action);
+                }
+            }
+            Bind::ButtonRepeat(action) => {
+                if !input.release {
+                    self.action_down(action);
+                    self.timer.set_timeout(&Duration::from_millis(100)).unwrap();
+                } else {
+                    self.action_up(action);
+                    self.timer.disarm().unwrap();
+                }
+            }
+            Bind::ButtonAB(action_a, action_b) => {
+                if !input.release {
+                    self.action_down(action_a);
+                    self.action_up(action_a);
+                } else {
+                    self.action_down(action_b);
+                    self.action_up(action_b);
                 }
             }
             Bind::Scroll { fwd, bak, rate } => {
@@ -423,7 +443,7 @@ impl Engine {
                     Some(Code::Knob) => self.ticks.knob.wrapping_add(1),
                     Some(Code::Scroll) => self.ticks.scroll.wrapping_add(1),
                     Some(Code::Dial) => self.ticks.dial.wrapping_add(1),
-                    _ => panic!(),
+                    _ => panic!("Scrolled something that should not scroll"),
                 };
                 let modulo = match rate {
                     Rate::Normal => 1,

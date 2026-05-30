@@ -99,11 +99,13 @@ impl<'a> Lookup<'a> {
             .as_str();
 
         let args = match captures.name("args") {
-            Some(args) => ARGUMENT_REGEX
-                .find_iter(args.as_str())
-                .map(|m| m.as_str().to_owned())
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
+            Some(args) => Some(
+                ARGUMENT_REGEX
+                    .find_iter(args.as_str())
+                    .map(|m| m.as_str().to_owned())
+                    .collect::<Vec<_>>(),
+            ),
+            None => None,
         };
 
         let flags = FLAG_REGEX
@@ -111,11 +113,16 @@ impl<'a> Lookup<'a> {
             .map(|m| m.as_str())
             .collect::<Vec<_>>();
 
-        Ok(Rc::new(Bind::Button {
-            cmd: self.action(action, Some(args)),
-            up: flags.contains(&":up"),
-            rep: flags.contains(&":rep"),
-        }))
+        let bind = if flags.contains(&":up") {
+            Bind::ButtonUp(self.action(action, args))
+        } else if flags.contains(&":rep") {
+            Bind::ButtonRepeat(self.action(action, args))
+        } else if flags.contains(&":ab") {
+            Bind::ButtonAB(self.action(action, args.clone()), self.action(action, args)) // TODO make this actually have a B-action
+        } else {
+            Bind::Button(self.action(action, args))
+        };
+        Ok(Rc::new(bind))
     }
 
     fn button_bind_opt(&self, str: &str) -> Option<Rc<Bind>> {
@@ -230,11 +237,10 @@ pub enum Rate {
 
 #[derive(Debug)]
 pub enum Bind {
-    Button {
-        cmd: Action,
-        up: bool,
-        rep: bool,
-    },
+    Button(Action),
+    ButtonUp(Action),
+    ButtonRepeat(Action),
+    ButtonAB(Action, Action),
     Scroll {
         fwd: Action,
         bak: Action,
