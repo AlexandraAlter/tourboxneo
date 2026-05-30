@@ -1,5 +1,5 @@
-use bitflags::Flags;
 /// Substantially copied from https://github.com/ptazithos/wkeys/tree/main/wkeys/src/native
+use bitflags::Flags;
 use log::{info, warn};
 
 use std::time::SystemTime;

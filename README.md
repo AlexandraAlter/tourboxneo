@@ -1,19 +1,15 @@
 # What the hell is this?
 
 Tourbox is a small usb device by Tourbox Tech Inc. Which lets you assign custom program actions and hotkeys.
-This Python script translates the serial IO to an evdev/uinput device.
+This Rust program translates the serial IO to simulated Wayland inputs.
 
-## Install
+## Execution
 
-    sudo pip install git+https://github.com/bloodywing/tourboxneo
-    
-or
-    
-    sudo pip install tourboxneo
-    
-The setup installs a init script in `/etc/init.d/`
+    cargo run -- -vv --config=<config>
 
-## Last words
+## Attributions
 
-This was hacked together in one day, the wrapper is far from perfect. But at least it makes it possible to use that
-expensive device with Linux
+Based heavily on the work of https://github.com/bloodywing/tourboxneo
+MIO Timer copied from https://github.com/idletea/mio-timerfd 
+Wayland output based on https://github.com/ptazithos/wkeys/tree/main/wkeys/src/native
+
