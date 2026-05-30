@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, rc::Rc};
+use std::{collections::HashMap, fmt, fs, path::PathBuf, rc::Rc};
 
 use log::error;
 
@@ -495,11 +495,15 @@ impl ConfigManager {
         }
     }
 
-    fn load_default_config(library: Rc<ActionLibrary>) -> Config {
-        let library = ActionLibrary::new(Some(library));
-        toml::from_str::<StringConfig>(DEFAULT_CONFIG_TOML)
+    pub fn load_config(&mut self, path: PathBuf) -> String {
+        let library = ActionLibrary::new(Some(self.default_library.clone()));
+        let str = fs::read_to_string(path).expect("Config is not readable");
+        let config = toml::from_str::<StringConfig>(&str)
             .unwrap()
-            .actualize(library)
+            .actualize(library);
+        let name = config.name.clone();
+        self.configs.push(Rc::new(config));
+        name
     }
 
     pub fn get_default_config(&self) -> Rc<Config> {
@@ -512,118 +516,24 @@ impl ConfigManager {
             .find(|c| c.name.eq(name))
             .map(|c| c.clone())
     }
+
+    fn load_default_config(library: Rc<ActionLibrary>) -> Config {
+        let library = ActionLibrary::new(Some(library));
+        toml::from_str::<StringConfig>(DEFAULT_CONFIG_TOML)
+            .unwrap()
+            .actualize(library)
+    }
 }
 
-pub static DEFAULT_CONFIG_TOML: &'static str = r#"
-name = "default"
-
-[prime]
-side = "esc"
-top = "tab"
-tall = "h"
-short = "mod4"
-
-[kit]
-
-[kit.dpad]
-up = "up"
-down = "down"
-left = "left"
-right = "right"
-
-[knob]
-press = "btn_left"
-turn = "ptr_wheel_discrete(20, 1)"
-
-[scroll]
-press = "none"
-turn = "none"
-
-[dial]
-press = "none"
-turn = "ptr_motion(50, 0)"
-"#;
+pub static DEFAULT_CONFIG_TOML: &'static str = include_str!("default.toml");
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::actions::{Axis, Modifiers};
     use evdev::KeyCode;
 
-    use crate::actions::Modifiers;
-
-    use super::*;
-
-    const CONFIG_1: &'static str = r#"
-name = "test1"
-
-[prime]
-side = "x"
-side_x2 = "x"
-top = "x"
-top_x2 = "x"
-tall = "x"
-tall_x2 = "x"
-short = "x"
-short_x2 = "x"
-side_top = "x"
-side_tall = "x"
-side_short = "x"
-top_tall = "x"
-top_short = "x"
-tall_short = "x"
-
-[kit]
-
-[kit.dpad]
-up = "x"
-down = "x"
-left = "x"
-right = "x"
-
-[kit.side_dpad]
-up = "x"
-down = "x"
-left = "x"
-right = "x"
-
-[kit.top_dpad]
-up = "x"
-down = "x"
-left = "x"
-right = "x"
-
-[knob]
-press = "x"
-turn = "x"
-side_turn = "x"
-top_turn = "x"
-tall_turn = "x"
-short_turn = "x"
-
-[scroll]
-press = "x"
-turn = "x"
-side_turn = "x"
-top_turn = "x"
-tall_turn = "x"
-short_turn = "x"
-
-[dial]
-press = "x"
-turn = "x"
-
-[shortcuts]
-a = "x"
-b = "x"
-c = "x"
-
-[[macro]]
-name = "foo"
-actions = ["a", "b", "c"]
-
-[[macro]]
-name = "foo"
-actions = ["a", "b", "c"]
-"#;
+    const CONFIG_1: &'static str = include_str!("test_config_1.toml");
 
     const BUTTON_BIND_MAX: &str = "a_b_1 (arg_1, arg_2, arg_3) :flag_1 :flag_2 :flag_3";
     const SCROLL_BIND_MAX: &str =
@@ -728,9 +638,10 @@ actions = ["a", "b", "c"]
         let config: StringConfig = toml::from_str(CONFIG_1).unwrap();
         let mut library = ActionLibrary::new(None);
         library.insert(
-            "x".to_string(),
+            "b".to_string(),
             Action::Key(KeyCode::KEY_X, Some(Modifiers::empty())),
         );
+        library.insert("t".to_string(), Action::PtrAxis(Axis::VerticalScroll, 20.0));
         library.insert("a".to_string(), Action::None);
         library.insert("b".to_string(), Action::None);
         library.insert("c".to_string(), Action::None);

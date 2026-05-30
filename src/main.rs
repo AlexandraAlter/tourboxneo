@@ -24,10 +24,12 @@ struct Args {
     #[arg(short, long)]
     device: Option<PathBuf>,
 
+    // TODO: unused
     /// PID file
     #[arg(short, long)]
     pid_file: Option<PathBuf>,
 
+    // TODO: unused
     /// daemon mode flag
     #[arg(long)]
     daemon: bool,
@@ -55,7 +57,12 @@ fn main() {
 
     println!("Startup complete at verbosity {}", args.verbose);
 
-    let mut engine = Engine::new();
+    let mut engine = Engine::new(args.device);
+
+    args.config.map(|path| {
+        let name = engine.load_config(path);
+        engine.set_config(&name)
+    });
 
     let mut poll = Poll::new().expect("MIO poll failed to start");
     poll.registry()

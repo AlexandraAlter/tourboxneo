@@ -1,0 +1,70 @@
+name = "test1"
+
+[prime]
+side = "b"
+side_x2 = "b"
+top = "b"
+top_x2 = "b"
+tall = "b"
+tall_x2 = "b"
+short = "b"
+short_x2 = "b"
+side_top = "b"
+side_tall = "b"
+side_short = "b"
+top_tall = "b"
+top_short = "b"
+tall_short = "b"
+
+[kit]
+
+[kit.dpad]
+up = "b"
+down = "b"
+left = "b"
+right = "b"
+
+[kit.side_dpad]
+up = "b"
+down = "b"
+left = "b"
+right = "b"
+
+[kit.top_dpad]
+up = "b"
+down = "b"
+left = "b"
+right = "b"
+
+[knob]
+press = "b"
+turn = "t"
+side_turn = "t"
+top_turn = "t"
+tall_turn = "t"
+short_turn = "t"
+
+[scroll]
+press = "b"
+turn = "t"
+side_turn = "t"
+top_turn = "t"
+tall_turn = "t"
+short_turn = "t"
+
+[dial]
+press = "b"
+turn = "t"
+
+[shortcuts]
+a = "b"
+b = "b"
+c = "b"
+
+[[macro]]
+name = "foo"
+actions = ["a", "b", "c"]
+
+[[macro]]
+name = "foo"
+actions = ["a", "b", "c"]

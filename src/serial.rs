@@ -1,5 +1,6 @@
 use std::{
-    io::{Bytes, Error, Read},
+    io::{Error, Read},
+    path::PathBuf,
     time::Duration,
 };
 
@@ -21,10 +22,13 @@ pub fn find_device() -> Option<SerialPortInfo> {
     })
 }
 
-pub fn open() -> SerialStream {
-    let device = find_device().expect("No device found");
-    let config = mio_serial::new(device.port_name, 115_200).timeout(Duration::from_millis(10));
-    SerialStream::open(&config).unwrap()
+pub fn open(path: Option<PathBuf>) -> SerialStream {
+    let device = match path {
+        Some(p) => p.to_string_lossy().to_string(),
+        None => find_device().expect("No device found").port_name,
+    };
+    let builder = mio_serial::new(device, 115_200).timeout(Duration::from_millis(10));
+    SerialStream::open(&builder).unwrap()
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, IntoPrimitive, TryFromPrimitive)]

@@ -3,7 +3,7 @@ name = "default"
 [prime]
 side = "esc"
 top = "tab"
-tall = "h"
+tall = "x"
 short = "mod4"
 
 [kit]

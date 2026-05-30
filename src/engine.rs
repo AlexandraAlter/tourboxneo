@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -47,9 +48,9 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new() -> Engine {
+    pub fn new(device_path: Option<PathBuf>) -> Engine {
         let timer = TimerFd::new(ClockId::Monotonic).expect("Failed to build timer");
-        let serial = SerialEventStream::new(serial::open());
+        let serial = SerialEventStream::new(serial::open(device_path));
 
         let output = OutputDriver::new();
 
@@ -66,6 +67,18 @@ impl Engine {
             held_binds: Vec::new(),
             ticks: Tickers::new(),
         }
+    }
+
+    pub fn load_config(&mut self, path: PathBuf) -> String {
+        self.config_manager.load_config(path)
+    }
+
+    pub fn set_config(&mut self, name: &str) {
+        let config = self
+            .config_manager
+            .get_config(name)
+            .expect("Config name should be valid");
+        self.config = config;
     }
 
     /// Given two codes, returns which one is not currently being held
