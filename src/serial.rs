@@ -1,11 +1,12 @@
 use std::{
-    io::{Bytes, Read},
+    io::{Bytes, Error, Read},
     time::Duration,
 };
 
 use log::info;
+use mio::event::Source;
 use mio_serial::{self, SerialPortInfo, SerialPortType, SerialStream};
-use num_enum::TryFromPrimitive;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 pub fn find_device() -> Option<SerialPortInfo> {
     let ports = mio_serial::available_ports().expect("No ports found!");
@@ -26,9 +27,9 @@ pub fn open() -> SerialStream {
     SerialStream::open(&config).unwrap()
 }
 
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
-pub enum Button {
+pub enum Code {
     Tall = 0x00,
     Side = 0x01,
     Top = 0x02,
@@ -39,12 +40,12 @@ pub enum Button {
     ShortDbl = 0x1c,
     TopDbl = 0x1f,
 
-    TallTop = 0x19,
+    SideTop = 0x20,
+    SideTall = 0x1b,
+    SideShort = 0x1e,
+    TopTall = 0x19,
+    TopShort = 0x1d,
     TallShort = 0x1a,
-    TallSide = 0x1b,
-    ShortTop = 0x1d,
-    ShortSide = 0x1e,
-    TopSide = 0x20,
 
     Tour = 0x2a,
 
@@ -53,71 +54,110 @@ pub enum Button {
     Left = 0x12,
     Right = 0x13,
 
-    UpSide = 0x14,
-    DownSide = 0x15,
-    LeftSide = 0x16,
-    RightSide = 0x17,
+    SideUp = 0x14,
+    SideDown = 0x15,
+    SideLeft = 0x16,
+    SideRight = 0x17,
 
-    UpTop = 0x2b,
-    DownTop = 0x2c,
-    LeftTop = 0x2d,
-    RightTop = 0x2e,
+    TopUp = 0x2b,
+    TopDown = 0x2c,
+    TopLeft = 0x2d,
+    TopRight = 0x2e,
 
     C1 = 0x22,
     C2 = 0x23,
 
-    C1Tall = 0x24,
-    C2Tall = 0x25,
+    TallC1 = 0x24,
+    TallC2 = 0x25,
 
-    C1Short = 0x39,
-    C2Short = 0x3a,
+    ShortC1 = 0x39,
+    ShortC2 = 0x3a,
 
-    Knob = 0x37,
-    Scroll = 0x0a,
-    Dial = 0x38,
+    KnobButton = 0x37,
+    Knob = 0x04,
+    TallKnob = 0x05,
+    ShortKnob = 0x06,
+    TopKnob = 0x07,
+    SideKnob = 0x08,
 
-    KnobS = 0x04,
-    KnobSTall = 0x05,
-    KnobSShort = 0x06,
-    KnobSTop = 0x07,
-    KnobSSide = 0x08,
+    ScrollButton = 0x0a,
+    Scroll = 0x09,
+    TallScroll = 0x0b,
+    ShortScroll = 0x0c,
+    TopScroll = 0x0d,
+    SideScroll = 0x0e,
 
-    ScrollS = 0x09,
-    ScrollSTall = 0x0b,
-    ScrollSShort = 0x0c,
-    ScrollSTop = 0x0d,
-    ScrollSSide = 0x0e,
-
-    DialS = 0x0f,
+    DialButton = 0x38,
+    Dial = 0x0f,
 }
 
-pub const REVERSE: u8 = 0x40;
-pub const RELEASE: u8 = 0x80;
+const CODE_MASK: u8 = !0xC0;
+const REVERSE: u8 = 0x40;
+const RELEASE: u8 = 0x80;
 
-pub struct Event {
-    button: Button,
-    reverse: bool,
-    release: bool,
+#[derive(Debug)]
+pub struct Input {
+    pub code: Code,
+    pub reverse: bool,
+    pub release: bool,
 }
 
-pub struct SerialEventStream {
-    serial: Bytes<SerialStream>,
-}
+impl From<u8> for Input {
+    fn from(value: u8) -> Self {
+        let release = value & RELEASE != 0;
+        let reverse = value & REVERSE != 0;
+        let code = Code::try_from(value & CODE_MASK).expect("Invalid code");
 
-impl SerialEventStream {
-    pub fn new() -> SerialEventStream {
-        let serial_stream = open();
-        SerialEventStream {
-            serial: serial_stream.bytes(),
+        Input {
+            code,
+            reverse,
+            release,
         }
     }
 }
 
+pub struct SerialEventStream {
+    serial: SerialStream,
+}
+
+impl SerialEventStream {
+    pub fn new(serial: SerialStream) -> SerialEventStream {
+        SerialEventStream { serial: serial }
+    }
+}
+
 impl Iterator for SerialEventStream {
-    type Item = Event;
+    type Item = Result<Input, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let byte = self.serial.next();
-        todo!()
+        let mut buf = [0u8; 1];
+        match self.serial.read_exact(&mut buf) {
+            Ok(_) => Some(Ok(buf[0].into())),
+            Err(err) => Some(Result::Err(err)),
+        }
+    }
+}
+
+impl Source for SerialEventStream {
+    fn register(
+        &mut self,
+        registry: &mio::Registry,
+        token: mio::Token,
+        interests: mio::Interest,
+    ) -> std::io::Result<()> {
+        self.serial.register(registry, token, interests)
+    }
+
+    fn reregister(
+        &mut self,
+        registry: &mio::Registry,
+        token: mio::Token,
+        interests: mio::Interest,
+    ) -> std::io::Result<()> {
+        self.serial.reregister(registry, token, interests)
+    }
+
+    fn deregister(&mut self, registry: &mio::Registry) -> std::io::Result<()> {
+        self.serial.deregister(registry)
     }
 }

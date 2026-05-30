@@ -1,16 +1,16 @@
+mod actions;
 mod config;
 mod engine;
 mod output;
 mod serial;
+mod timer;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use clap::Parser;
+use mio::{Events, Interest, Poll, Token};
 
-use crate::{
-    engine::Engine,
-    output::{Modifiers, OutputDriver},
-};
+use crate::engine::Engine;
 
 /// TourBox NEO CLI arguments
 #[derive(Parser, Debug)]
@@ -41,6 +41,9 @@ struct Args {
     quiet: bool,
 }
 
+const SERIAL: Token = Token(0);
+const REPEAT: Token = Token(1);
+
 fn main() {
     let args = Args::parse();
 
@@ -53,12 +56,27 @@ fn main() {
     println!("Startup complete at verbosity {}", args.verbose);
 
     let mut engine = Engine::new();
-    engine.begin();
 
-    // let mut kb = OutputDriver::new();
-    // kb.append_mod(Modifiers::SHIFT);
-    // kb.key_press(evdev::KeyCode::KEY_X);
-    // kb.key_release(evdev::KeyCode::KEY_X);
-    // kb.remove_mod(Modifiers::SHIFT);
-    // kb.test();
+    let mut poll = Poll::new().expect("MIO poll failed to start");
+    poll.registry()
+        .register(engine.get_serial(), SERIAL, Interest::READABLE)
+        .expect("MIO register failed");
+    poll.registry()
+        .register(engine.get_timer(), REPEAT, Interest::READABLE)
+        .unwrap();
+
+    let mut events = Events::with_capacity(128);
+
+    loop {
+        poll.poll(&mut events, Some(Duration::from_millis(100)))
+            .unwrap();
+
+        for event in events.iter() {
+            match event.token() {
+                SERIAL => engine.handle_serial(),
+                REPEAT => engine.handle_repeat(),
+                _ => {}
+            }
+        }
+    }
 }

@@ -1,12 +1,14 @@
+use bitflags::Flags;
 /// Substantially copied from https://github.com/ptazithos/wkeys/tree/main/wkeys/src/native
-use bitflags::bitflags;
 use log::{info, warn};
 
+use std::time::SystemTime;
 use std::{fs::File, io::Write, os::fd::AsFd, path::PathBuf};
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
     protocol::{
         wl_keyboard::{self, KeyState},
+        wl_pointer::{Axis as WlAxis, AxisSource, ButtonState},
         wl_registry::{self, WlRegistry},
         wl_seat::{self, WlSeat},
     },
@@ -20,6 +22,17 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
     zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
 };
 use xkbcommon::xkb;
+
+use crate::actions::{Axis, Modifiers};
+
+impl From<Axis> for WlAxis {
+    fn from(value: Axis) -> Self {
+        match value {
+            Axis::VerticalScroll => WlAxis::VerticalScroll,
+            Axis::HorizontalScroll => WlAxis::HorizontalScroll,
+        }
+    }
+}
 
 struct SessionState {
     pub keyboard_manager: Option<ZwpVirtualKeyboardManagerV1>,
@@ -166,28 +179,13 @@ fn get_keymap_as_file() -> (File, u32) {
     (file, keymap.len() as u32)
 }
 
-bitflags! {
-    #[derive(Debug)]
-    pub struct Modifiers: u32 {
-        const SHIFT = 0x01;
-        const CTRL = 0x04;
-        const ALT = 0x08;
-        const META = 0x40;
-    }
-
-    #[derive(Debug)]
-    pub struct Locks: u32 {
-        const CAPSLOCK = 0x0002;
-        const NUMLOCK = 0x0100;
-        const SCROLLLOCK = 0x8000;
-    }
-}
-
 pub struct OutputDriver {
     session_state: SessionState,
     event_queue: EventQueue<SessionState>,
     modifiers: Modifiers,
-    locks: Locks,
+    latches: Modifiers,
+    locks: Modifiers,
+    start_time: SystemTime,
 }
 
 impl OutputDriver {
@@ -217,14 +215,36 @@ impl OutputDriver {
             session_state: state,
             event_queue: event_queue,
             modifiers: Modifiers::empty(),
-            locks: Locks::empty(),
+            latches: Modifiers::empty(),
+            locks: Modifiers::empty(),
+            start_time: SystemTime::now(),
         }
+    }
+
+    fn get_cur_ms(&self) -> u32 {
+        self.start_time.elapsed().unwrap().as_millis() as u32
     }
 
     pub fn key_press(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
             info!("Key pressed: {:?}", key);
-            keyboard.key(0, key.code().into(), KeyState::Pressed.into());
+            keyboard.key(
+                self.get_cur_ms(),
+                key.code().into(),
+                KeyState::Pressed.into(),
+            );
+            self.event_queue.roundtrip(&mut self.session_state).unwrap();
+        }
+    }
+
+    pub fn key_repeat(&mut self, key: evdev::KeyCode) {
+        if let Some(keyboard) = &self.session_state.keyboard {
+            info!("Key repeated: {:?}", key);
+            keyboard.key(
+                self.get_cur_ms(),
+                key.code().into(),
+                KeyState::Repeated.into(),
+            );
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
     }
@@ -232,45 +252,140 @@ impl OutputDriver {
     pub fn key_release(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
             info!("Key released: {:?}", key);
-            keyboard.key(0, key.code().into(), KeyState::Released.into());
+            keyboard.key(
+                self.get_cur_ms(),
+                key.code().into(),
+                KeyState::Released.into(),
+            );
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
     }
 
-    pub fn append_mod(&mut self, mkey: Modifiers) {
+    pub fn mod_append(&mut self, mkey: Modifiers) {
         info!("Mod appended: {:?}", mkey);
         self.modifiers.insert(mkey);
         self.update_state();
     }
 
-    pub fn remove_mod(&mut self, mkey: Modifiers) {
+    pub fn mod_remove(&mut self, mkey: Modifiers) {
         info!("Mod removed: {:?}", mkey);
         self.modifiers.remove(mkey);
         self.update_state();
     }
 
-    pub fn append_lock(&mut self, lkey: Locks) {
+    pub fn mods_clear(&mut self) {
+        info!("Mods cleared");
+        self.modifiers.clear();
+        self.update_state();
+    }
+
+    pub fn latch_append(&mut self, mkey: Modifiers) {
+        info!("Latch appended: {:?}", mkey);
+        self.latches.insert(mkey);
+        self.update_state();
+    }
+
+    pub fn latch_remove(&mut self, mkey: Modifiers) {
+        info!("Latch removed: {:?}", mkey);
+        self.latches.remove(mkey);
+        self.update_state();
+    }
+
+    pub fn latches_clear(&mut self) {
+        info!("Latches cleared");
+        self.latches.clear();
+        self.update_state();
+    }
+
+    pub fn lock_append(&mut self, lkey: Modifiers) {
         info!("Lock appended: {:?}", lkey);
         self.locks.insert(lkey);
         self.update_state();
     }
 
-    pub fn remove_lock(&mut self, lkey: Locks) {
+    pub fn lock_remove(&mut self, lkey: Modifiers) {
         info!("Lock removed: {:?}", lkey);
         self.locks.remove(lkey);
         self.update_state();
     }
 
-    pub fn test(&mut self) {
-        if let Some(pointer) = &self.session_state.pointer {
-            pointer.motion(0, 50.0, 50.0);
-            self.event_queue.roundtrip(&mut self.session_state).unwrap();
-        }
+    pub fn locks_clear(&mut self) {
+        info!("Locks cleared");
+        self.locks.clear();
+        self.update_state();
     }
 
     fn update_state(&mut self) {
         if let Some(keyboard) = &self.session_state.keyboard {
-            keyboard.modifiers(self.modifiers.bits(), 0, self.locks.bits(), 0);
+            keyboard.modifiers(
+                self.modifiers.bits(),
+                self.latches.bits(),
+                self.locks.bits(),
+                0,
+            );
+            self.event_queue.roundtrip(&mut self.session_state).unwrap();
+        }
+    }
+
+    pub fn ptr_motion(&mut self, dx: f64, dy: f64) {
+        if let Some(pointer) = &self.session_state.pointer {
+            pointer.motion(self.get_cur_ms(), dx, dy);
+            self.event_queue.roundtrip(&mut self.session_state).unwrap();
+        }
+    }
+
+    pub fn ptr_motion_absolute(&mut self, x: u32, y: u32, x_extent: u32, y_extent: u32) {
+        if let Some(pointer) = &self.session_state.pointer {
+            pointer.motion_absolute(self.get_cur_ms(), x, y, x_extent, y_extent);
+            self.event_queue.roundtrip(&mut self.session_state).unwrap();
+        }
+    }
+
+    pub fn ptr_button(&mut self, button: u32, released: bool) {
+        if let Some(pointer) = &self.session_state.pointer {
+            let state = if released {
+                ButtonState::Released
+            } else {
+                ButtonState::Pressed
+            };
+            warn!("Pointer button: {}, {:?}", button, state);
+            pointer.button(self.get_cur_ms(), button, state);
+            self.event_queue.roundtrip(&mut self.session_state).unwrap();
+        }
+    }
+
+    pub fn ptr_axis(&mut self, axis: Axis, value: f64) {
+        if let Some(pointer) = &self.session_state.pointer {
+            info!("Scrolled: {:?} by {:?}", axis, value);
+            pointer.axis(self.get_cur_ms(), axis.into(), value);
+            self.event_queue.roundtrip(&mut self.session_state).unwrap();
+        }
+    }
+
+    pub fn ptr_frame(&mut self) {
+        if let Some(pointer) = &self.session_state.pointer {
+            pointer.frame();
+            self.event_queue.roundtrip(&mut self.session_state).unwrap();
+        }
+    }
+
+    pub fn ptr_axis_source(&mut self, axis_source: AxisSource) {
+        if let Some(pointer) = &self.session_state.pointer {
+            pointer.axis_source(axis_source);
+            self.event_queue.roundtrip(&mut self.session_state).unwrap();
+        }
+    }
+
+    pub fn ptr_axis_stop(&mut self, axis: Axis) {
+        if let Some(pointer) = &self.session_state.pointer {
+            pointer.axis_stop(self.get_cur_ms(), axis.into());
+            self.event_queue.roundtrip(&mut self.session_state).unwrap();
+        }
+    }
+
+    pub fn ptr_axis_discrete(&mut self, axis: Axis, value: f64, discrete: i32) {
+        if let Some(pointer) = &self.session_state.pointer {
+            pointer.axis_discrete(self.get_cur_ms(), axis.into(), value, discrete);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
     }
