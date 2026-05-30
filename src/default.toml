@@ -3,8 +3,8 @@ name = "default"
 [prime]
 side = "esc"
 top = "tab"
-tall = "h"
-short = "mod4"
+tall = "space"
+short = "enter"
 
 [kit]
 
@@ -15,13 +15,13 @@ left = "left"
 right = "right"
 
 [knob]
-press = "btn_left"
+press = "none"
 turn = "ptr_wheel_discrete(20, 1)"
 
 [scroll]
-press = "none"
-turn = "none"
+press = "btn_middle"
+turn = "ptr_wheel_discrete(20, 1)"
 
 [dial]
 press = "none"
-turn = "ptr_motion(50, 0)"
+turn = "ptr_hwheel_discrete(20, 1)"
