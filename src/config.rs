@@ -1,12 +1,16 @@
-use std::{collections::HashMap, fmt, fs, path::PathBuf, rc::Rc};
+use std::{collections::HashMap, fmt, fs, ops::Range, path::PathBuf, rc::Rc};
 
 use log::error;
 
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Deserialize;
+use toml::Spanned;
 
-use crate::actions::{Action, ActionLibrary};
+use crate::{
+    actions::{Action, ActionLibrary, Modifiers},
+    error::ConfigError,
+};
 
 // Action format:
 // - "a"
@@ -19,7 +23,7 @@ use crate::actions::{Action, ActionLibrary};
 // - "ptr_wheel:rev"
 
 lazy_static! {
-    static ref BUTTON_REGEX: Regex = {
+    static ref SINGLE_REGEX: Regex = {
         Regex::new(
             r"(?x)
                 ^\s*(?P<action>[[:word:]]+)\s*
@@ -29,15 +33,16 @@ lazy_static! {
         )
         .expect("Regex failed to compile")
     };
-    static ref SCROLL_REGEX: Regex = {
+    static ref DOUBLE_REGEX: Regex = {
         Regex::new(
             r"(?x)
-                ^\s*(?P<fwd_action>[[:word:]]+)\s*
-                (?:\(\s*(?P<fwd_args>[[:word:]]+\s*(?:,\s*[[:word:]]+\s*)*)\s*\))?
-                (?:\s*/\s*(?P<bak_action>[[:word:]]+)\s*
-                  (?:\(\s*(?P<bak_args>[[:word:]]+\s*(?:,\s*[[:word:]]+\s*)*)\s*\))?
-                )?
-                \s*(?P<flags>(?::[[:word:]]+\s*)*)$
+                ^\s*(?P<action>[[:word:]]+)\s*
+                (?:\(\s*(?P<args>[[:word:]]+\s*(?:,\s*[[:word:]]+\s*)*)\s*\))?
+                (?P<flags>(?::[[:word:]]+\s*)*)
+                (?:\s*/\s*(?P<alt_action>[[:word:]]+)\s*
+                  (?:\(\s*(?P<alt_args>[[:word:]]+\s*(?:,\s*[[:word:]]+\s*)*)\s*\))?
+                )
+                \s*(?P<alt_flags>(?::[[:word:]]+\s*)*)$
             ",
         )
         .expect("Regex failed to compile")
@@ -55,157 +60,234 @@ lazy_static! {
     static ref FLAG_REGEX: Regex = Regex::new(r":[[:word:]]+").expect("Regex failed to compile");
 }
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum Flag {
+    Up,
+    Repeat,
+    Rev,
+    Rate(Rate),
+    Mod(Modifiers),
+}
+
 pub struct Lookup<'a>(&'a mut ActionLibrary);
 
-#[derive(Debug)]
-struct BindError {
-    source: String,
-    reason: String,
-}
-
-impl BindError {
-    fn new(source: &str, reason: &str) -> BindError {
-        BindError {
-            source: source.to_owned(),
-            reason: reason.to_owned(),
-        }
-    }
-}
-
-impl fmt::Display for BindError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Failed to parse binding '{}': {}",
-            self.source, self.reason
-        )
-    }
-}
-
 impl<'a> Lookup<'a> {
-    fn action(&self, str: &str, args: Option<Vec<String>>) -> Action {
+    fn action(
+        &self,
+        str: &str,
+        args: Option<Vec<String>>,
+        range: Range<usize>,
+    ) -> Result<Rc<Action>, ConfigError> {
         self.0
-            .get(&str)
-            .unwrap_or_else(|| panic!("Invalid action: {}", str))
-            .call(args.unwrap_or_else(|| Vec::new()))
+            .get(str.as_ref(), &args)
+            .ok_or_else(|| ConfigError::new("", range))
     }
 
-    fn button_bind(&self, str: &str) -> Result<Rc<Bind>, BindError> {
-        let captures = BUTTON_REGEX.captures(str).expect("Match failed");
-
-        let action = captures
-            .name("action")
-            .expect("Missing action name")
-            .as_str();
-
-        let args = match captures.name("args") {
+    fn args(&self, args: Option<&str>) -> Option<Vec<String>> {
+        match args {
             Some(args) => Some(
                 ARGUMENT_REGEX
-                    .find_iter(args.as_str())
+                    .find_iter(args)
                     .map(|m| m.as_str().to_owned())
                     .collect::<Vec<_>>(),
             ),
             None => None,
-        };
+        }
+    }
 
-        let flags = FLAG_REGEX
-            .find_iter(captures.name("flags").unwrap().as_str())
-            .map(|m| m.as_str())
+    fn flags(&self, flags: &str, range: Range<usize>) -> Result<Vec<Flag>, ConfigError> {
+        let flag_vec = FLAG_REGEX
+            .find_iter(flags)
+            .map(|f| match f.as_str().strip_prefix(":").unwrap() {
+                "up" => Some(Flag::Up),
+                "rep" => Some(Flag::Repeat),
+                "rev" => Some(Flag::Rev),
+                "slow" => Some(Flag::Rate(Rate::Slow)),
+                "slower" => Some(Flag::Rate(Rate::Slower)),
+                m @ _ => Modifiers::lookup_mod(m).map(|m| Flag::Mod(m)),
+            })
             .collect::<Vec<_>>();
-
-        let bind = if flags.contains(&":up") {
-            Bind::ButtonUp(self.action(action, args))
-        } else if flags.contains(&":rep") {
-            Bind::ButtonRepeat(self.action(action, args))
-        } else if flags.contains(&":ab") {
-            Bind::ButtonAB(self.action(action, args.clone()), self.action(action, args)) // TODO make this actually have a B-action
-        } else {
-            Bind::Button(self.action(action, args))
-        };
-        Ok(Rc::new(bind))
+        if flag_vec.contains(&None) {
+            return Err(ConfigError::new("unrecogized flag", range));
+        }
+        let flag_vec: Vec<_> = flag_vec.iter().flatten().cloned().collect();
+        if flag_vec
+            .iter()
+            .filter(|f| vec![Flag::Up, Flag::Repeat].contains(*f))
+            .count()
+            > 1
+        {
+            return Err(ConfigError::new("multiple mode-setting flags", range));
+        }
+        if flag_vec
+            .iter()
+            .filter(|f| vec![Flag::Rate(Rate::Slow), Flag::Rate(Rate::Slower)].contains(*f))
+            .count()
+            > 1
+        {
+            return Err(ConfigError::new("multiple rate flags", range));
+        }
+        Ok(flag_vec)
     }
 
-    fn button_bind_opt(&self, str: &str) -> Option<Rc<Bind>> {
-        self.button_bind(str).inspect_err(|e| error!("{}", e)).ok()
-    }
+    fn action_and_flags(
+        &self,
+        action_str: &str,
+        args_str: Option<&str>,
+        flags_str: &str,
+        range: Range<usize>,
+    ) -> Result<(Rc<Action>, Vec<Flag>), ConfigError> {
+        let args = self.args(args_str);
+        let mut action = self.action(action_str, args, range.clone())?;
+        let flags = self.flags(flags_str, range.clone())?;
 
-    fn scroll_bind(&self, str: &str) -> Result<Rc<Bind>, BindError> {
-        let captures = SCROLL_REGEX.captures(str).expect("Match failed");
-
-        let fwd_action = captures.name("fwd_action").unwrap().as_str();
-        let fwd_args = match captures.name("fwd_args") {
-            Some(args) => ARGUMENT_REGEX
-                .find_iter(args.as_str())
-                .map(|m| m.as_str().to_owned())
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
-        };
-        let fwd = self.action(fwd_action, Some(fwd_args));
-
-        let bak = match captures.name("bak_action") {
-            Some(action) => {
-                let args = match captures.name("bak_args") {
-                    Some(args) => ARGUMENT_REGEX
-                        .find_iter(args.as_str())
-                        .map(|m| m.as_str().to_owned())
-                        .collect::<Vec<_>>(),
-                    None => Vec::new(),
-                };
-                self.action(action.as_str(), Some(args.clone()))
-            }
-            None => fwd.reverse(),
-        };
-
-        let flags = FLAG_REGEX
-            .find_iter(captures.name("flags").unwrap().as_str())
-            .map(|m| m.as_str());
-
-        let mut rate = Rate::Normal;
-        let mut reverse = false;
-        for f in flags {
-            if f == ":slow" {
-                if rate != Rate::Normal {
-                    return Err(BindError::new(str, "Duplicate flag: :slow"));
+        let mut mods = Vec::new();
+        let mut non_mods_flags = Vec::new();
+        for flag in flags {
+            match flag {
+                Flag::Mod(modifiers) => mods.push(modifiers),
+                Flag::Rev => {
+                    action = action
+                        .reverse()
+                        .ok_or_else(|| ConfigError::new("action is not reversible", range.clone()))?
+                        .into()
                 }
-                rate = Rate::Slow;
-            } else if f == ":slower" {
-                if rate != Rate::Normal {
-                    return Err(BindError::new(str, "Duplicate flag: :slower"));
-                }
-                rate = Rate::Slower;
-            } else if f == ":rev" {
-                if reverse != false {
-                    return Err(BindError::new(str, "Duplicate flag: :rev"));
-                }
-                reverse = true;
-            } else {
-                return Err(BindError::new(str, "Unexpected flag"));
+                _ => non_mods_flags.push(flag),
             }
         }
 
-        let bind = if !reverse {
-            Bind::Scroll {
-                fwd: fwd,
-                bak: bak,
-                rate: rate,
-            }
-        } else {
-            Bind::Scroll {
-                fwd: bak,
-                bak: fwd,
-                rate: rate,
-            }
-        };
+        if !mods.is_empty() {
+            let modifiers = mods
+                .iter()
+                .fold(Modifiers::default(), |acc, m| acc.union(m));
+            action = action
+                .with_modifiers(&modifiers)
+                .ok_or_else(|| ConfigError::new("action cannot be modified", range.clone()))?
+                .into()
+        }
 
-        Ok(Rc::new(bind))
+        Ok((action, non_mods_flags))
     }
 
-    fn scroll_bind_opt(&self, str: &str) -> Option<Rc<Bind>> {
+    fn button_bind(&self, str: Spanned<String>) -> Result<Rc<Bind>, ConfigError> {
+        let range = str.span();
+        let captures = DOUBLE_REGEX
+            .captures(str.as_ref())
+            .or_else(|| SINGLE_REGEX.captures(str.as_ref()))
+            .ok_or_else(|| ConfigError::new("invalid button", range.clone()))?;
+
+        let action_str = captures
+            .name("action")
+            .expect("Missing action name")
+            .as_str();
+        let args_str = captures.name("args").map(|a| a.as_str());
+        let flags_str = captures.name("flags").unwrap().as_str();
+        let (action, flags) =
+            self.action_and_flags(action_str, args_str, flags_str, range.clone())?;
+
+        // If we've got an alt_action or a :rev flag, we're parsing an AB button
+        if captures.name("alt_action").is_some() {
+            let alt_action_str = captures
+                .name("alt_action")
+                .expect("Missing alt action name")
+                .as_str();
+            let alt_args_str = captures.name("alt_args").map(|a| a.as_str());
+            let alt_flags_str = captures.name("alt_flags").unwrap().as_str();
+            let (alt_action, alt_flags) =
+                self.action_and_flags(alt_action_str, alt_args_str, alt_flags_str, range.clone())?;
+
+            if !alt_flags.is_empty() {
+                return Err(ConfigError::new(
+                    "AB binds accept no other flags",
+                    range.clone(),
+                ));
+            }
+
+            return Ok(Bind::ButtonAB(action.into(), alt_action.into()).into());
+        }
+
+        let bind = if flags.contains(&Flag::Up) {
+            Bind::ButtonUp(action.into())
+        } else if flags.contains(&Flag::Repeat) {
+            Bind::ButtonRepeat(action.into())
+        } else {
+            Bind::Button(action.into())
+        };
+
+        Ok(bind.into())
+    }
+
+    fn button_bind_opt(&self, str: Spanned<String>) -> Option<Rc<Bind>> {
+        self.button_bind(str).inspect_err(|e| error!("{}", e)).ok()
+    }
+
+    #[cfg(test)]
+    fn button_bind_str(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
+        self.button_bind(Spanned::new(0..str.len(), str.to_owned()))
+    }
+
+    fn scroll_bind(&self, str: Spanned<String>) -> Result<Rc<Bind>, ConfigError> {
+        let range = str.span();
+        let captures = DOUBLE_REGEX
+            .captures(str.get_ref())
+            .or_else(|| SINGLE_REGEX.captures(str.get_ref()))
+            .ok_or_else(|| ConfigError::new("invalid scroll", range.clone()))?;
+
+        let action_str = captures
+            .name("action")
+            .expect("Missing action name")
+            .as_str();
+        let args_str = captures.name("args").map(|a| a.as_str());
+        let flags_str = captures.name("flags").unwrap().as_str();
+        let (action, flags) =
+            self.action_and_flags(action_str, args_str, flags_str, range.clone())?;
+
+        let (alt_action, alt_flags) = if captures.name("alt_action").is_some() {
+            let alt_action_str = captures
+                .name("alt_action")
+                .expect("Missing alt action name")
+                .as_str();
+            let alt_args_str = captures.name("alt_args").map(|a| a.as_str());
+            let alt_flags_str = captures.name("alt_flags").unwrap().as_str();
+            let (alt_action, alt_flags) =
+                self.action_and_flags(alt_action_str, alt_args_str, alt_flags_str, range.clone())?;
+
+            (alt_action, alt_flags)
+        } else {
+            let reversed = action
+                .reverse()
+                .ok_or_else(|| ConfigError::new("Action is not reversible", range.clone()))?
+                .into();
+            (reversed, vec![])
+        };
+
+        let mut rate = Rate::Normal;
+        for f in flags.iter().chain(alt_flags.iter()) {
+            match f {
+                Flag::Rate(r) => rate = *r,
+                _ => panic!("Unrecognised flag: {:?}", f),
+            }
+        }
+
+        Ok(Bind::Scroll {
+            fwd: action.into(),
+            bak: alt_action.into(),
+            rate: rate,
+        }
+        .into())
+    }
+
+    fn scroll_bind_opt(&self, str: Spanned<String>) -> Option<Rc<Bind>> {
         self.scroll_bind(str).inspect_err(|e| error!("{}", e)).ok()
     }
 
-    fn shortcut_bind(&self, str: &str) -> Action {
-        let captures = SHORTCUT_REGEX.captures(str).expect("Match failed");
+    #[cfg(test)]
+    fn scroll_bind_str(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
+        self.scroll_bind(Spanned::new(0..str.len(), str.to_owned()))
+    }
+
+    fn shortcut_bind(&self, str: Spanned<String>) -> Result<Rc<Action>, ConfigError> {
+        let captures = SHORTCUT_REGEX.captures(str.as_ref()).expect("Match failed");
 
         let action = captures
             .name("action")
@@ -220,7 +302,7 @@ impl<'a> Lookup<'a> {
             None => Vec::new(),
         };
 
-        self.action(action, Some(args))
+        self.action(action, Some(args), str.span())
     }
 
     fn library(&mut self) -> &mut ActionLibrary {
@@ -228,7 +310,7 @@ impl<'a> Lookup<'a> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Rate {
     Normal,
     Slow,
@@ -237,15 +319,27 @@ pub enum Rate {
 
 #[derive(Debug)]
 pub enum Bind {
-    Button(Action),
-    ButtonUp(Action),
-    ButtonRepeat(Action),
-    ButtonAB(Action, Action),
+    Button(Rc<Action>),
+    ButtonUp(Rc<Action>),
+    ButtonRepeat(Rc<Action>),
+    ButtonAB(Rc<Action>, Rc<Action>),
     Scroll {
-        fwd: Action,
-        bak: Action,
+        fwd: Rc<Action>,
+        bak: Rc<Action>,
         rate: Rate,
     },
+}
+
+impl fmt::Display for Bind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Bind::Button(action) => write!(f, "btn {}", action),
+            Bind::ButtonUp(action) => todo!(),
+            Bind::ButtonRepeat(action) => todo!(),
+            Bind::ButtonAB(action, action1) => todo!(),
+            Bind::Scroll { fwd, bak, rate } => todo!(),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -267,23 +361,23 @@ pub struct Prime<B> {
     pub tall_short: Option<B>,
 }
 
-impl Prime<String> {
+impl Prime<Spanned<String>> {
     pub fn actualize(self, lookup: &Lookup) -> Prime<Rc<Bind>> {
         Prime {
-            side: self.side.and_then(|s| lookup.button_bind_opt(&s)),
-            side_x2: self.side_x2.and_then(|s| lookup.button_bind_opt(&s)),
-            top: self.top.and_then(|s| lookup.button_bind_opt(&s)),
-            top_x2: self.top_x2.and_then(|s| lookup.button_bind_opt(&s)),
-            tall: self.tall.and_then(|s| lookup.button_bind_opt(&s)),
-            tall_x2: self.tall_x2.and_then(|s| lookup.button_bind_opt(&s)),
-            short: self.short.and_then(|s| lookup.button_bind_opt(&s)),
-            short_x2: self.short_x2.and_then(|s| lookup.button_bind_opt(&s)),
-            side_top: self.side_top.and_then(|s| lookup.button_bind_opt(&s)),
-            side_tall: self.side_tall.and_then(|s| lookup.button_bind_opt(&s)),
-            side_short: self.side_short.and_then(|s| lookup.button_bind_opt(&s)),
-            top_tall: self.top_tall.and_then(|s| lookup.button_bind_opt(&s)),
-            top_short: self.top_short.and_then(|s| lookup.button_bind_opt(&s)),
-            tall_short: self.tall_short.and_then(|s| lookup.button_bind_opt(&s)),
+            side: self.side.and_then(|s| lookup.button_bind_opt(s)),
+            side_x2: self.side_x2.and_then(|s| lookup.button_bind_opt(s)),
+            top: self.top.and_then(|s| lookup.button_bind_opt(s)),
+            top_x2: self.top_x2.and_then(|s| lookup.button_bind_opt(s)),
+            tall: self.tall.and_then(|s| lookup.button_bind_opt(s)),
+            tall_x2: self.tall_x2.and_then(|s| lookup.button_bind_opt(s)),
+            short: self.short.and_then(|s| lookup.button_bind_opt(s)),
+            short_x2: self.short_x2.and_then(|s| lookup.button_bind_opt(s)),
+            side_top: self.side_top.and_then(|s| lookup.button_bind_opt(s)),
+            side_tall: self.side_tall.and_then(|s| lookup.button_bind_opt(s)),
+            side_short: self.side_short.and_then(|s| lookup.button_bind_opt(s)),
+            top_tall: self.top_tall.and_then(|s| lookup.button_bind_opt(s)),
+            top_short: self.top_short.and_then(|s| lookup.button_bind_opt(s)),
+            tall_short: self.tall_short.and_then(|s| lookup.button_bind_opt(s)),
         }
     }
 }
@@ -297,13 +391,13 @@ pub struct DPad<B> {
     pub right: Option<B>,
 }
 
-impl DPad<String> {
+impl DPad<Spanned<String>> {
     pub fn actualize(self, lookup: &Lookup) -> DPad<Rc<Bind>> {
         DPad {
-            up: self.up.and_then(|s| lookup.button_bind_opt(&s)),
-            down: self.down.and_then(|s| lookup.button_bind_opt(&s)),
-            left: self.left.and_then(|s| lookup.button_bind_opt(&s)),
-            right: self.right.and_then(|s| lookup.button_bind_opt(&s)),
+            up: self.up.and_then(|s| lookup.button_bind_opt(s)),
+            down: self.down.and_then(|s| lookup.button_bind_opt(s)),
+            left: self.left.and_then(|s| lookup.button_bind_opt(s)),
+            right: self.right.and_then(|s| lookup.button_bind_opt(s)),
         }
     }
 }
@@ -337,19 +431,19 @@ impl<B> Kit<B> {
     }
 }
 
-impl Kit<String> {
+impl Kit<Spanned<String>> {
     pub fn actualize(self, lookup: &Lookup) -> Kit<Rc<Bind>> {
         Kit {
             dpad: self.dpad.map(|dp| dp.actualize(&lookup)),
             side_dpad: self.side_dpad.map(|dp| dp.actualize(&lookup)),
             top_dpad: self.top_dpad.map(|dp| dp.actualize(&lookup)),
-            c1: self.c1.and_then(|s| lookup.button_bind_opt(&s)),
-            c2: self.c2.and_then(|s| lookup.button_bind_opt(&s)),
-            tall_c1: self.tall_c1.and_then(|s| lookup.button_bind_opt(&s)),
-            tall_c2: self.tall_c2.and_then(|s| lookup.button_bind_opt(&s)),
-            short_c1: self.short_c1.and_then(|s| lookup.button_bind_opt(&s)),
-            short_c2: self.short_c2.and_then(|s| lookup.button_bind_opt(&s)),
-            tour: self.tour.and_then(|s| lookup.button_bind_opt(&s)),
+            c1: self.c1.and_then(|s| lookup.button_bind_opt(s)),
+            c2: self.c2.and_then(|s| lookup.button_bind_opt(s)),
+            tall_c1: self.tall_c1.and_then(|s| lookup.button_bind_opt(s)),
+            tall_c2: self.tall_c2.and_then(|s| lookup.button_bind_opt(s)),
+            short_c1: self.short_c1.and_then(|s| lookup.button_bind_opt(s)),
+            short_c2: self.short_c2.and_then(|s| lookup.button_bind_opt(s)),
+            tour: self.tour.and_then(|s| lookup.button_bind_opt(s)),
         }
     }
 }
@@ -365,15 +459,15 @@ pub struct Knob<B> {
     pub short_turn: Option<B>,
 }
 
-impl Knob<String> {
+impl Knob<Spanned<String>> {
     pub fn actualize(self, lookup: &Lookup) -> Knob<Rc<Bind>> {
         Knob {
-            press: self.press.and_then(|s| lookup.button_bind_opt(&s)),
-            turn: self.turn.and_then(|s| lookup.scroll_bind_opt(&s)),
-            side_turn: self.side_turn.and_then(|s| lookup.scroll_bind_opt(&s)),
-            top_turn: self.top_turn.and_then(|s| lookup.scroll_bind_opt(&s)),
-            tall_turn: self.tall_turn.and_then(|s| lookup.scroll_bind_opt(&s)),
-            short_turn: self.short_turn.and_then(|s| lookup.scroll_bind_opt(&s)),
+            press: self.press.and_then(|s| lookup.button_bind_opt(s)),
+            turn: self.turn.and_then(|s| lookup.scroll_bind_opt(s)),
+            side_turn: self.side_turn.and_then(|s| lookup.scroll_bind_opt(s)),
+            top_turn: self.top_turn.and_then(|s| lookup.scroll_bind_opt(s)),
+            tall_turn: self.tall_turn.and_then(|s| lookup.scroll_bind_opt(s)),
+            short_turn: self.short_turn.and_then(|s| lookup.scroll_bind_opt(s)),
         }
     }
 }
@@ -385,11 +479,11 @@ pub struct Dial<B> {
     pub turn: Option<B>,
 }
 
-impl Dial<String> {
+impl Dial<Spanned<String>> {
     pub fn actualize(self, lookup: &Lookup) -> Dial<Rc<Bind>> {
         Dial {
-            press: self.press.and_then(|s| lookup.button_bind_opt(&s)),
-            turn: self.turn.and_then(|s| lookup.scroll_bind_opt(&s)),
+            press: self.press.and_then(|s| lookup.button_bind_opt(s)),
+            turn: self.turn.and_then(|s| lookup.scroll_bind_opt(s)),
         }
     }
 }
@@ -410,10 +504,10 @@ pub struct RawConfig<A, B> {
     pub knob: Option<Knob<B>>,
     pub scroll: Option<Knob<B>>,
     pub dial: Option<Dial<B>>,
-    #[serde(default)]
+    #[serde(default = "HashMap::new")]
     pub shortcuts: HashMap<String, A>,
     #[serde(rename = "macro")]
-    #[serde(default)]
+    #[serde(default = "Vec::new")]
     pub macros: Vec<Macro<A>>,
     #[serde(skip)]
     pub library: Option<ActionLibrary>,
@@ -441,16 +535,16 @@ impl<A, B> RawConfig<A, B> {
     }
 }
 
-pub type StringConfig = RawConfig<String, String>;
-pub type Config = RawConfig<Action, Rc<Bind>>;
+pub type StringConfig = RawConfig<Spanned<String>, Spanned<String>>;
+pub type Config = RawConfig<Rc<Action>, Rc<Bind>>;
 
 impl StringConfig {
-    pub fn actualize(self, mut library: ActionLibrary) -> Config {
+    pub fn actualize(self, mut library: ActionLibrary) -> Result<Config, ConfigError> {
         let mut lookup = Lookup(&mut library);
 
         let mut new_shortcuts = HashMap::new();
-        for (key, str) in self.shortcuts.iter() {
-            let action = lookup.shortcut_bind(str);
+        for (key, str) in self.shortcuts.into_iter() {
+            let action = lookup.shortcut_bind(str)?;
             lookup.library().insert(key.to_string(), action.clone());
             new_shortcuts.insert(key.to_string(), action);
         }
@@ -460,14 +554,14 @@ impl StringConfig {
             let name = mac.name.to_string();
             let actions = Vec::new();
             let mac = Action::Macro(name.clone(), actions.clone());
-            lookup.library().insert(name.clone(), mac);
+            lookup.library().insert(name.clone(), mac.into());
             new_macros.push(Macro {
                 name: name.clone(),
                 actions: actions,
             });
         }
 
-        Config {
+        Ok(Config {
             name: self.name,
             prime: self.prime.map(|v| v.actualize(&lookup)),
             kit: self.kit.map(|v| v.actualize(&lookup)),
@@ -477,11 +571,9 @@ impl StringConfig {
             shortcuts: new_shortcuts,
             macros: new_macros,
             library: Some(library),
-        }
+        })
     }
 }
-
-impl Config {}
 
 pub struct ConfigManager {
     default_library: Rc<ActionLibrary>,
@@ -505,8 +597,9 @@ impl ConfigManager {
         let library = ActionLibrary::new(Some(self.default_library.clone()));
         let str = fs::read_to_string(path).expect("Config is not readable");
         let config = toml::from_str::<StringConfig>(&str)
-            .unwrap()
-            .actualize(library);
+            .expect("Unable to load config")
+            .actualize(library)
+            .unwrap();
         let name = config.name.clone();
         self.configs.push(Rc::new(config));
         name
@@ -528,6 +621,7 @@ impl ConfigManager {
         toml::from_str::<StringConfig>(DEFAULT_CONFIG_TOML)
             .unwrap()
             .actualize(library)
+            .unwrap()
     }
 }
 
@@ -546,111 +640,117 @@ mod tests {
         "a_b_1 (arg_1, arg_2, 1) / c_d_2 (arg_3, arg_4, 2) :flag_1 :flag_2 :flag_3";
 
     #[test]
-    fn bind_regexes_match_examples() {
-        assert!(BUTTON_REGEX.is_match("a") == true);
-        assert!(BUTTON_REGEX.is_match("a:up:rep") == true);
-        assert!(BUTTON_REGEX.is_match("ptr_x(val):rep") == true);
-        assert!(BUTTON_REGEX.is_match("ptr_x(val):rep") == true);
-        assert!(BUTTON_REGEX.is_match(BUTTON_BIND_MAX) == true);
-        assert!(SCROLL_REGEX.is_match("a/b") == true);
-        assert!(SCROLL_REGEX.is_match("a/b:slow") == true);
-        assert!(SCROLL_REGEX.is_match("a/b:slower") == true);
-        assert!(SCROLL_REGEX.is_match("ptr_wheel") == true);
-        assert!(SCROLL_REGEX.is_match("ptr_wheel:rev") == true);
-        assert!(SCROLL_REGEX.is_match(SCROLL_BIND_MAX) == true);
+    fn regexes_match_examples() {
+        assert!(SINGLE_REGEX.is_match("a") == true);
+        assert!(SINGLE_REGEX.is_match("a:up:rep") == true);
+        assert!(SINGLE_REGEX.is_match("ptr_x(val):rep") == true);
+        assert!(SINGLE_REGEX.is_match("ptr_x(val):rep") == true);
+        assert!(SINGLE_REGEX.is_match("ptr_wheel") == true);
+        assert!(SINGLE_REGEX.is_match("ptr_wheel:rev") == true);
+        assert!(SINGLE_REGEX.is_match(BUTTON_BIND_MAX) == true);
+        assert!(DOUBLE_REGEX.is_match("a/b") == true);
+        assert!(DOUBLE_REGEX.is_match("a/b:slow") == true);
+        assert!(DOUBLE_REGEX.is_match("a/b:slower") == true);
+        assert!(DOUBLE_REGEX.is_match(SCROLL_BIND_MAX) == true);
     }
 
     #[test]
-    fn bind_regexes_return_matches() {
-        let button_match = BUTTON_REGEX
+    fn regexes_return_captures() {
+        let button_match = SINGLE_REGEX
             .captures(BUTTON_BIND_MAX)
             .expect("Match failed");
-        assert!(button_match.name("action").unwrap().as_str() == "a_b_1");
+        assert_eq!(button_match.name("action").unwrap().as_str(), "a_b_1");
 
         assert!(button_match.name("args").is_some());
         let button_args_match = ARGUMENT_REGEX
             .find_iter(button_match.name("args").unwrap().as_str())
             .collect::<Vec<_>>();
-        assert!(button_args_match.len() == 3);
-        assert!(button_args_match.get(0).unwrap().as_str() == "arg_1");
-        assert!(button_args_match.get(1).unwrap().as_str() == "arg_2");
-        assert!(button_args_match.get(2).unwrap().as_str() == "arg_3");
+        assert_eq!(button_args_match.len(), 3);
+        assert_eq!(button_args_match.get(0).unwrap().as_str(), "arg_1");
+        assert_eq!(button_args_match.get(1).unwrap().as_str(), "arg_2");
+        assert_eq!(button_args_match.get(2).unwrap().as_str(), "arg_3");
 
         assert!(button_match.name("flags").is_some());
         let button_flags_match = FLAG_REGEX
             .find_iter(button_match.name("flags").unwrap().as_str())
             .collect::<Vec<_>>();
-        assert!(button_flags_match.len() == 3);
-        assert!(button_flags_match.get(0).unwrap().as_str() == ":flag_1");
-        assert!(button_flags_match.get(1).unwrap().as_str() == ":flag_2");
-        assert!(button_flags_match.get(2).unwrap().as_str() == ":flag_3");
+        assert_eq!(button_flags_match.len(), 3);
+        assert_eq!(button_flags_match.get(0).unwrap().as_str(), ":flag_1");
+        assert_eq!(button_flags_match.get(1).unwrap().as_str(), ":flag_2");
+        assert_eq!(button_flags_match.get(2).unwrap().as_str(), ":flag_3");
 
-        let scroll_match = SCROLL_REGEX
+        let scroll_match = DOUBLE_REGEX
             .captures(SCROLL_BIND_MAX)
             .expect("Match failed");
 
-        assert!(scroll_match.name("fwd_action").unwrap().as_str() == "a_b_1");
+        assert!(scroll_match.name("action").unwrap().as_str() == "a_b_1");
 
-        assert!(scroll_match.name("fwd_args").is_some());
+        assert!(scroll_match.name("args").is_some());
         let scroll_args_match = ARGUMENT_REGEX
-            .find_iter(scroll_match.name("fwd_args").unwrap().as_str())
+            .find_iter(scroll_match.name("args").unwrap().as_str())
             .collect::<Vec<_>>();
-        assert!(scroll_args_match.len() == 3);
-        assert!(scroll_args_match.get(0).unwrap().as_str() == "arg_1");
-        assert!(scroll_args_match.get(1).unwrap().as_str() == "arg_2");
-        assert!(scroll_args_match.get(2).unwrap().as_str() == "1");
+        assert_eq!(scroll_args_match.len(), 3);
+        assert_eq!(scroll_args_match.get(0).unwrap().as_str(), "arg_1");
+        assert_eq!(scroll_args_match.get(1).unwrap().as_str(), "arg_2");
+        assert_eq!(scroll_args_match.get(2).unwrap().as_str(), "1");
 
-        assert!(scroll_match.name("bak_action").unwrap().as_str() == "c_d_2");
+        assert!(scroll_match.name("alt_action").unwrap().as_str() == "c_d_2");
 
-        assert!(scroll_match.name("bak_args").is_some());
+        assert!(scroll_match.name("alt_args").is_some());
         let scroll_args_match = ARGUMENT_REGEX
-            .find_iter(scroll_match.name("bak_args").unwrap().as_str())
+            .find_iter(scroll_match.name("alt_args").unwrap().as_str())
             .collect::<Vec<_>>();
-        assert!(scroll_args_match.len() == 3);
-        assert!(scroll_args_match.get(0).unwrap().as_str() == "arg_3");
-        assert!(scroll_args_match.get(1).unwrap().as_str() == "arg_4");
-        assert!(scroll_args_match.get(2).unwrap().as_str() == "2");
+        assert_eq!(scroll_args_match.len(), 3);
+        assert_eq!(scroll_args_match.get(0).unwrap().as_str(), "arg_3");
+        assert_eq!(scroll_args_match.get(1).unwrap().as_str(), "arg_4");
+        assert_eq!(scroll_args_match.get(2).unwrap().as_str(), "2");
 
-        assert!(scroll_match.name("flags").is_some());
+        assert!(scroll_match.name("alt_flags").is_some());
         let scroll_flags_match = FLAG_REGEX
-            .find_iter(scroll_match.name("flags").unwrap().as_str())
+            .find_iter(scroll_match.name("alt_flags").unwrap().as_str())
             .collect::<Vec<_>>();
-        assert!(scroll_flags_match.len() == 3);
-        assert!(scroll_flags_match.get(0).unwrap().as_str() == ":flag_1");
-        assert!(scroll_flags_match.get(1).unwrap().as_str() == ":flag_2");
-        assert!(scroll_flags_match.get(2).unwrap().as_str() == ":flag_3");
+        assert_eq!(scroll_flags_match.len(), 3);
+        assert_eq!(scroll_flags_match.get(0).unwrap().as_str(), ":flag_1");
+        assert_eq!(scroll_flags_match.get(1).unwrap().as_str(), ":flag_2");
+        assert_eq!(scroll_flags_match.get(2).unwrap().as_str(), ":flag_3");
     }
 
     #[test]
-    fn parse_bindings() {
+    fn lookup_returns_bindings() {
         let mut library = ActionLibrary::new(None);
         library.insert(
             "x".to_string(),
-            Action::Key(KeyCode::KEY_X, Some(Modifiers::empty())),
+            Action::Key(KeyCode::KEY_X, Some(Modifiers::default())).into(),
         );
         let lookup = Lookup(&mut library);
 
-        lookup.button_bind("x(1):up:rep").unwrap();
-        lookup.scroll_bind("x(1)/x(2):slower:rev").unwrap();
+        assert!(lookup.button_bind_str("x(1):S:rightalt:up").is_ok());
+        assert!(lookup.button_bind_str("x:D").is_err());
+        assert!(lookup.button_bind_str("x(1)/x(2)").is_ok());
+        assert!(lookup.scroll_bind_str("x(1):alt/x(2):slower:M").is_ok());
+        assert!(lookup.scroll_bind_str("x(1):up").is_err());
     }
 
     #[test]
-    fn parse_full_config() {
+    fn parses_full_config() {
         toml::from_str::<StringConfig>(CONFIG_1).unwrap();
     }
 
     #[test]
-    fn actualize_full_config() {
+    fn actualizes_full_config() {
         let config: StringConfig = toml::from_str(CONFIG_1).unwrap();
         let mut library = ActionLibrary::new(None);
         library.insert(
             "b".to_string(),
-            Action::Key(KeyCode::KEY_X, Some(Modifiers::empty())),
+            Action::Key(KeyCode::KEY_X, Some(Modifiers::default())).into(),
         );
-        library.insert("t".to_string(), Action::PtrAxis(Axis::VerticalScroll, 20.0));
-        library.insert("a".to_string(), Action::None);
-        library.insert("b".to_string(), Action::None);
-        library.insert("c".to_string(), Action::None);
-        config.actualize(library);
+        library.insert(
+            "t".to_string(),
+            Action::PtrAxis(Axis::VerticalScroll, 20.0, None).into(),
+        );
+        library.insert("a".to_string(), Action::None.into());
+        library.insert("b".to_string(), Action::None.into());
+        library.insert("c".to_string(), Action::None.into());
+        config.actualize(library).unwrap();
     }
 }

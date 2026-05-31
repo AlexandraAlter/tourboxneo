@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     io::{Error, Read},
     path::PathBuf,
     time::Duration,
@@ -31,7 +32,7 @@ pub fn open(path: Option<PathBuf>) -> SerialStream {
     SerialStream::open(&builder).unwrap()
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, IntoPrimitive, TryFromPrimitive)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, IntoPrimitive, TryFromPrimitive, Hash)]
 #[repr(u8)]
 pub enum Code {
     Tall = 0x00,
@@ -93,6 +94,15 @@ pub enum Code {
 
     DialButton = 0x38,
     Dial = 0x0f,
+
+    /// Dummy value used in `Engine::held_actions` for ongoing macro invocations
+    Macro = 0xff,
+}
+
+impl fmt::Display for Code {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
 const CODE_MASK: u8 = !0xC0;
@@ -104,6 +114,14 @@ pub struct Input {
     pub code: Code,
     pub reverse: bool,
     pub release: bool,
+}
+
+impl fmt::Display for Input {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let kind = if self.release { " (rel)" } else { "" };
+        let rev = if self.reverse { " (rev)" } else { "" };
+        write!(f, "{}{}{}", self.code, kind, rev)
+    }
 }
 
 impl From<u8> for Input {

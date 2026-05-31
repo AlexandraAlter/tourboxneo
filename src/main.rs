@@ -1,6 +1,7 @@
 mod actions;
 mod config;
 mod engine;
+mod error;
 mod output;
 mod serial;
 mod timer;

@@ -1,6 +1,6 @@
 /// Substantially copied from https://github.com/ptazithos/wkeys/tree/main/wkeys/src/native
 use bitflags::Flags;
-use log::{info, warn};
+use log::warn;
 
 use std::time::SystemTime;
 use std::{fs::File, io::Write, os::fd::AsFd, path::PathBuf};
@@ -23,7 +23,7 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
 };
 use xkbcommon::xkb;
 
-use crate::actions::{Axis, Modifiers};
+use crate::actions::{Axis, ModifierFlags};
 
 impl From<Axis> for WlAxis {
     fn from(value: Axis) -> Self {
@@ -182,9 +182,9 @@ fn get_keymap_as_file() -> (File, u32) {
 pub struct OutputDriver {
     session_state: SessionState,
     event_queue: EventQueue<SessionState>,
-    modifiers: Modifiers,
-    latches: Modifiers,
-    locks: Modifiers,
+    modifiers: ModifierFlags,
+    latches: ModifierFlags,
+    locks: ModifierFlags,
     start_time: SystemTime,
 }
 
@@ -214,9 +214,9 @@ impl OutputDriver {
         Self {
             session_state: state,
             event_queue: event_queue,
-            modifiers: Modifiers::empty(),
-            latches: Modifiers::empty(),
-            locks: Modifiers::empty(),
+            modifiers: ModifierFlags::empty(),
+            latches: ModifierFlags::empty(),
+            locks: ModifierFlags::empty(),
             start_time: SystemTime::now(),
         }
     }
@@ -227,7 +227,6 @@ impl OutputDriver {
 
     pub fn key_press(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
-            info!("Key pressed: {:?}", key);
             keyboard.key(
                 self.get_cur_ms(),
                 key.code().into(),
@@ -239,7 +238,6 @@ impl OutputDriver {
 
     pub fn key_repeat(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
-            info!("Key repeated: {:?}", key);
             keyboard.key(
                 self.get_cur_ms(),
                 key.code().into(),
@@ -251,7 +249,6 @@ impl OutputDriver {
 
     pub fn key_release(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
-            info!("Key released: {:?}", key);
             keyboard.key(
                 self.get_cur_ms(),
                 key.code().into(),
@@ -261,56 +258,47 @@ impl OutputDriver {
         }
     }
 
-    pub fn mod_append(&mut self, mkey: Modifiers) {
-        info!("Mod appended: {:?}", mkey);
+    pub fn mod_append(&mut self, mkey: ModifierFlags) {
         self.modifiers.insert(mkey);
         self.update_state();
     }
 
-    pub fn mod_remove(&mut self, mkey: Modifiers) {
-        info!("Mod removed: {:?}", mkey);
+    pub fn mod_remove(&mut self, mkey: ModifierFlags) {
         self.modifiers.remove(mkey);
         self.update_state();
     }
 
     pub fn mods_clear(&mut self) {
-        info!("Mods cleared");
         self.modifiers.clear();
         self.update_state();
     }
 
-    pub fn latch_append(&mut self, mkey: Modifiers) {
-        info!("Latch appended: {:?}", mkey);
+    pub fn latch_append(&mut self, mkey: ModifierFlags) {
         self.latches.insert(mkey);
         self.update_state();
     }
 
-    pub fn latch_remove(&mut self, mkey: Modifiers) {
-        info!("Latch removed: {:?}", mkey);
+    pub fn latch_remove(&mut self, mkey: ModifierFlags) {
         self.latches.remove(mkey);
         self.update_state();
     }
 
     pub fn latches_clear(&mut self) {
-        info!("Latches cleared");
         self.latches.clear();
         self.update_state();
     }
 
-    pub fn lock_append(&mut self, lkey: Modifiers) {
-        info!("Lock appended: {:?}", lkey);
+    pub fn lock_append(&mut self, lkey: ModifierFlags) {
         self.locks.insert(lkey);
         self.update_state();
     }
 
-    pub fn lock_remove(&mut self, lkey: Modifiers) {
-        info!("Lock removed: {:?}", lkey);
+    pub fn lock_remove(&mut self, lkey: ModifierFlags) {
         self.locks.remove(lkey);
         self.update_state();
     }
 
     pub fn locks_clear(&mut self) {
-        info!("Locks cleared");
         self.locks.clear();
         self.update_state();
     }
@@ -348,7 +336,6 @@ impl OutputDriver {
             } else {
                 ButtonState::Pressed
             };
-            warn!("Pointer button: {}, {:?}", button, state);
             pointer.button(self.get_cur_ms(), button, state);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
@@ -356,7 +343,6 @@ impl OutputDriver {
 
     pub fn ptr_axis(&mut self, axis: Axis, value: f64) {
         if let Some(pointer) = &self.session_state.pointer {
-            info!("Scrolled: {:?} by {:?}", axis, value);
             pointer.axis(self.get_cur_ms(), axis.into(), value);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }

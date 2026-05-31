@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -5,7 +6,7 @@ use std::time::Duration;
 
 use log::info;
 
-use crate::actions::Action;
+use crate::actions::{Action, Modifiers};
 use crate::config::{Bind, Config, ConfigManager, Rate};
 use crate::output::OutputDriver;
 use crate::serial::{self, Code, Input, SerialEventStream};
@@ -39,10 +40,10 @@ pub struct Engine {
     config_manager: ConfigManager,
     /// Track current config
     config: Rc<Config>,
-    /// Held buttons
-    held_buttons: Vec<Code>,
+    /// Held actions
+    held_actions: HashMap<Code, Rc<Action>>,
     /// Held binds, for repeating events
-    held_binds: Vec<Bind>,
+    repeating_codes: Vec<Code>,
     /// Tickers for each dial
     ticks: Tickers,
 }
@@ -63,8 +64,8 @@ impl Engine {
             output: output,
             config_manager: config_manager,
             config: config,
-            held_buttons: Vec::new(),
-            held_binds: Vec::new(),
+            held_actions: HashMap::new(),
+            repeating_codes: Vec::new(),
             ticks: Tickers::new(),
         }
     }
@@ -84,7 +85,7 @@ impl Engine {
     /// Given two codes, returns which one is not currently being held
     /// Used to calculate fallbacks to more complicated keycodes
     fn missing_code(&self, input_a: Code, input_b: Code) -> Code {
-        if self.held_buttons.contains(&input_a) {
+        if self.held_actions.contains_key(&input_a) {
             input_b
         } else {
             input_a
@@ -112,7 +113,7 @@ impl Engine {
     }
 
     /// Given a code without a matching bind in the current config, return an appropriate fallback bind
-    fn fallback_code_to_bind(&self, input: Code) -> Option<Rc<Bind>> {
+    fn code_to_fallback_bind(&self, input: Code) -> Option<Rc<Bind>> {
         let code = match input {
             Code::TallDbl => Code::Tall,
             Code::SideDbl => Code::Side,
@@ -167,44 +168,44 @@ impl Engine {
             Code::TallDbl => config
                 .prime_ref()
                 .and_then(|v| v.tall_x2.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::SideDbl => config
                 .prime_ref()
                 .and_then(|v| v.side_x2.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::ShortDbl => config
                 .prime_ref()
                 .and_then(|v| v.short_x2.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::TopDbl => config
                 .prime_ref()
                 .and_then(|v| v.top_x2.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
 
             Code::SideTop => config
                 .prime_ref()
                 .and_then(|v| v.side_top.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::SideTall => config
                 .prime_ref()
                 .and_then(|v| v.side_tall.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::SideShort => config
                 .prime_ref()
                 .and_then(|v| v.side_short.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::TopTall => config
                 .prime_ref()
                 .and_then(|v| v.top_tall.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::TopShort => config
                 .prime_ref()
                 .and_then(|v| v.top_short.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::TallShort => config
                 .prime_ref()
                 .and_then(|v| v.tall_short.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
 
             Code::Tour => config.kit_ref().and_then(|v| v.tour.clone()),
 
@@ -224,36 +225,36 @@ impl Engine {
             Code::SideUp => config
                 .kit_ref()
                 .and_then(|v| v.side_dpad_ref().and_then(|v| v.up.clone()))
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::SideDown => config
                 .kit_ref()
                 .and_then(|v| v.side_dpad_ref().and_then(|v| v.down.clone()))
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::SideLeft => config
                 .kit_ref()
                 .and_then(|v| v.side_dpad_ref().and_then(|v| v.left.clone()))
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::SideRight => config
                 .kit_ref()
                 .and_then(|v| v.side_dpad_ref().and_then(|v| v.right.clone()))
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
 
             Code::TopUp => config
                 .kit_ref()
                 .and_then(|v| v.top_dpad_ref().and_then(|v| v.up.clone()))
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::TopDown => config
                 .kit_ref()
                 .and_then(|v| v.top_dpad_ref().and_then(|v| v.down.clone()))
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::TopLeft => config
                 .kit_ref()
                 .and_then(|v| v.top_dpad_ref().and_then(|v| v.left.clone()))
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::TopRight => config
                 .kit_ref()
                 .and_then(|v| v.top_dpad_ref().and_then(|v| v.right.clone()))
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
 
             Code::C1 => config.kit_ref().and_then(|v| v.c1.clone()),
             Code::C2 => config.kit_ref().and_then(|v| v.c2.clone()),
@@ -261,61 +262,63 @@ impl Engine {
             Code::TallC1 => config
                 .kit_ref()
                 .and_then(|v| v.tall_c1.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::TallC2 => config
                 .kit_ref()
                 .and_then(|v| v.tall_c2.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
 
             Code::ShortC1 => config
                 .kit_ref()
                 .and_then(|v| v.short_c1.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::ShortC2 => config
                 .kit_ref()
                 .and_then(|v| v.short_c2.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
 
             Code::KnobButton => config.knob_ref().and_then(|v| v.press.clone()),
             Code::Knob => config.knob_ref().and_then(|v| v.turn.clone()),
             Code::TallKnob => config
                 .knob_ref()
                 .and_then(|v| v.tall_turn.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::ShortKnob => config
                 .knob_ref()
                 .and_then(|v| v.short_turn.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::TopKnob => config
                 .knob_ref()
                 .and_then(|v| v.top_turn.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::SideKnob => config
                 .knob_ref()
                 .and_then(|v| v.side_turn.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
 
             Code::ScrollButton => config.scroll_ref().and_then(|v| v.press.clone()),
             Code::Scroll => config.scroll_ref().and_then(|v| v.turn.clone()),
             Code::TallScroll => config
                 .scroll_ref()
                 .and_then(|v| v.tall_turn.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::ShortScroll => config
                 .scroll_ref()
                 .and_then(|v| v.short_turn.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::TopScroll => config
                 .scroll_ref()
                 .and_then(|v| v.top_turn.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
             Code::SideScroll => config
                 .scroll_ref()
                 .and_then(|v| v.side_turn.clone())
-                .or_else(|| self.fallback_code_to_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(input)),
 
             Code::DialButton => config.dial_ref().and_then(|v| v.press.clone()),
             Code::Dial => config.dial_ref().and_then(|v| v.turn.clone()),
+
+            _ => panic!("Impossible code received"),
         }
     }
 
@@ -327,114 +330,139 @@ impl Engine {
         &mut self.timer
     }
 
-    fn action_down(&mut self, action: &Action) {
-        match action {
+    fn mods_down(&mut self, mods: &Modifiers) {
+        for key in mods.keys() {
+            self.output.key_press(*key);
+        }
+        self.output.mod_append(*mods.flags());
+    }
+
+    fn mods_up(&mut self, mods: &Modifiers) {
+        for key in mods.keys() {
+            self.output.key_release(*key);
+        }
+        self.output.mod_remove(*mods.flags());
+    }
+
+    fn action_down(&mut self, code: Code, action: Rc<Action>) {
+        self.held_actions.insert(code, action.clone());
+        match &*action {
             Action::None => {}
-            Action::Mod(modifiers, keycode) => {
-                keycode.map(|k| self.output.key_press(k));
-                self.output.mod_append(*modifiers)
+            Action::Mod(mods) => {
+                self.mods_down(mods);
             }
-            Action::Key(key_code, modifiers) => {
-                modifiers.map(|m| self.output.mod_append(m));
+            Action::Key(key_code, mods) => {
+                mods.as_ref().map(|m| self.mods_down(&m));
                 self.output.key_press(*key_code);
             }
-            Action::PtrMotion(dx, dy) => {
+            Action::PtrMotion(dx, dy, mods) => {
+                mods.as_ref().map(|m| self.mods_down(&m));
                 self.output.ptr_motion(*dx, *dy);
                 self.output.ptr_frame();
             }
-            Action::PtrMotionAbs(x, y, x_extent, y_extent) => {
+            Action::PtrMotionAbs(x, y, x_extent, y_extent, mods) => {
+                mods.as_ref().map(|m| self.mods_down(&m));
                 self.output
                     .ptr_motion_absolute(*x, *y, *x_extent, *y_extent);
                 self.output.ptr_frame();
             }
-            Action::PtrButton(button) => {
+            Action::PtrButton(button, mods) => {
+                mods.as_ref().map(|m| self.mods_down(&m));
                 self.output.ptr_button(*button, false);
                 self.output.ptr_frame();
             }
-            Action::PtrAxis(axis, value) => {
+            Action::PtrAxis(axis, value, mods) => {
+                mods.as_ref().map(|m| self.mods_down(&m));
                 self.output.ptr_axis(*axis, *value);
                 self.output.ptr_frame();
             }
-            Action::PtrAxisDiscrete(axis, value, discrete) => {
+            Action::PtrAxisDiscrete(axis, value, discrete, mods) => {
+                mods.as_ref().map(|m| self.mods_down(&m));
                 self.output.ptr_axis_discrete(*axis, *value, *discrete);
                 self.output.ptr_axis_stop(*axis);
                 self.output.ptr_frame();
             }
             Action::Macro(_, actions) => {
                 for a in actions {
-                    self.action_down(a);
-                    self.action_up(a);
+                    self.action_down(Code::Macro, a.clone());
+                    self.action_up(Code::Macro, a.clone());
                 }
             }
             Action::Menu(_, _items) => todo!(),
         };
     }
 
-    fn action_up(&mut self, action: &Action) {
-        match action {
+    fn action_up(&mut self, code: Code, action: Rc<Action>) {
+        self.held_actions.remove(&code);
+        match &*action {
             Action::None => {}
-            Action::Mod(modifiers, keycode) => {
-                keycode.map(|k| self.output.key_press(k));
-                self.output.mod_remove(*modifiers)
+            Action::Mod(mods) => {
+                self.mods_up(mods);
             }
-            Action::Key(key_code, modifiers) => {
+            Action::Key(key_code, mods) => {
                 self.output.key_release(*key_code);
-                modifiers.map(|m| self.output.mod_remove(m));
+                mods.as_ref().map(|m| self.mods_up(&m));
             }
-            Action::PtrMotion(_, _) => {}
-            Action::PtrMotionAbs(_, _, _, _) => {}
-            Action::PtrButton(button) => {
+            Action::PtrMotion(_, _, mods) => {
+                mods.as_ref().map(|m| self.mods_up(&m));
+            }
+            Action::PtrMotionAbs(_, _, _, _, mods) => {
+                mods.as_ref().map(|m| self.mods_up(&m));
+            }
+            Action::PtrButton(button, mods) => {
                 self.output.ptr_button(*button, true);
                 self.output.ptr_frame();
+                mods.as_ref().map(|m| self.mods_up(&m));
             }
-            Action::PtrAxis(_, _) => {}
-            Action::PtrAxisDiscrete(_, _, _) => {}
+            Action::PtrAxis(_, _, mods) => {
+                mods.as_ref().map(|m| self.mods_up(&m));
+            }
+            Action::PtrAxisDiscrete(_, _, _, mods) => {
+                mods.as_ref().map(|m| self.mods_up(&m));
+            }
             Action::Macro(_, _actions) => {}
             Action::Menu(_, _items) => todo!(),
         };
     }
 
     fn handle_input(&mut self, input: Input) {
-        info!("Input {:?}", input);
-        if !input.release {
-            self.held_buttons.push(input.code);
-        } else {
-            self.held_buttons.retain(|c| *c != input.code);
-        }
         let bind = self.code_to_bind(input.code);
         if bind.is_none() {
             return;
         }
+        info!("{} -> {}", input, bind.as_ref().unwrap());
         match bind.unwrap().as_ref() {
             Bind::Button(action) => {
                 if !input.release {
-                    self.action_down(action);
+                    self.action_down(input.code, action.clone());
                 } else {
-                    self.action_up(action);
+                    self.action_up(input.code, action.clone());
                 }
             }
             Bind::ButtonUp(action) => {
                 if input.release {
-                    self.action_down(action);
-                    self.action_up(action);
+                    self.action_down(input.code, action.clone());
+                    self.action_up(input.code, action.clone());
                 }
             }
             Bind::ButtonRepeat(action) => {
                 if !input.release {
-                    self.action_down(action);
+                    self.repeating_codes.push(input.code);
+                    self.action_down(input.code, action.clone());
                     self.timer.set_timeout(&Duration::from_millis(100)).unwrap();
                 } else {
-                    self.action_up(action);
+                    self.repeating_codes.retain(|c| *c != input.code);
+                    self.action_up(input.code, action.clone());
                     self.timer.disarm().unwrap();
                 }
             }
             Bind::ButtonAB(action_a, action_b) => {
                 if !input.release {
-                    self.action_down(action_a);
-                    self.action_up(action_a);
+                    self.action_down(input.code, action_a.clone());
+                    self.action_up(input.code, action_a.clone());
                 } else {
-                    self.action_down(action_b);
-                    self.action_up(action_b);
+                    self.action_down(input.code, action_b.clone());
+                    self.action_up(input.code, action_b.clone());
                 }
             }
             Bind::Scroll { fwd, bak, rate } => {
@@ -453,8 +481,8 @@ impl Engine {
                 if counter % modulo == 0 {
                     let act = if input.reverse { bak } else { fwd };
                     if !input.release {
-                        self.action_down(act);
-                        self.action_up(act);
+                        self.action_down(input.code, act.clone());
+                        self.action_up(input.code, act.clone());
                     }
                 }
             }

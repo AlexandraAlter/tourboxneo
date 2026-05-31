@@ -6,8 +6,8 @@ use evdev::KeyCode;
 use lazy_static::lazy_static;
 
 bitflags! {
-    #[derive(Default, Copy, Clone, Debug)]
-    pub struct Modifiers: u32 {
+    #[derive(Default, Copy, Clone, PartialEq, Eq, Debug)]
+    pub struct ModifierFlags: u32 {
         const SHIFT = 0x0001;
         const CAPSLOCK = 0x0002;
         const CTRL = 0x0004;
@@ -27,47 +27,164 @@ bitflags! {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
+pub struct Modifiers(ModifierFlags, Vec<KeyCode>);
+
+impl Modifiers {
+    pub fn flags(&self) -> &ModifierFlags {
+        &self.0
+    }
+
+    pub fn keys(&self) -> &Vec<KeyCode> {
+        &self.1
+    }
+
+    pub fn union(&self, other: &Modifiers) -> Modifiers {
+        let mut keys = Vec::new();
+        keys.extend(self.1.iter());
+        keys.extend(other.1.iter());
+        Modifiers(self.0.union(other.0), keys)
+    }
+
+    fn lookup_short_mod(str: &str) -> Option<Modifiers> {
+        SHORT_MODIFIERS.get(str).map(|m| {
+            MODIFIERS
+                .get(m)
+                .expect("Short modifier should correspond to a long modifier")
+                .to_owned()
+        })
+    }
+
+    pub fn lookup_mod(str: &str) -> Option<Modifiers> {
+        MODIFIERS
+            .get(str)
+            .map(|t| t.to_owned())
+            .or_else(|| Self::lookup_short_mod(str))
+    }
+}
+
+impl fmt::Display for Modifiers {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mods = self
+            .flags()
+            .iter()
+            .map(|mf| {
+                let mod_short = match mf {
+                    ModifierFlags::SHIFT => "S",
+                    ModifierFlags::CAPSLOCK => "Cl",
+                    ModifierFlags::CTRL => "C",
+                    ModifierFlags::MOD1 => "M1",
+                    ModifierFlags::MOD2 => "M2",
+                    ModifierFlags::MOD3 => "M3",
+                    ModifierFlags::MOD4 => "M4",
+                    ModifierFlags::MOD5 => "M5",
+                    ModifierFlags::NUMLOCK => "Nl",
+                    ModifierFlags::ALT => "A",
+                    ModifierFlags::LEVELTHREE => "L3",
+                    ModifierFlags::SUPER => "S",
+                    ModifierFlags::LEVELFIVE => "L5",
+                    ModifierFlags::META => "M",
+                    ModifierFlags::HYPER => "H",
+                    ModifierFlags::SCROLLLOCK => "Sl",
+                    _ => "?",
+                };
+                ":".to_owned() + mod_short
+            })
+            .collect::<Vec<String>>()
+            .join("");
+        write!(f, "{}", mods)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Axis {
     VerticalScroll,
     HorizontalScroll,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     None,
-    Mod(Modifiers, Option<KeyCode>),
+    Mod(Modifiers),
     Key(KeyCode, Option<Modifiers>),
-    PtrMotion(f64, f64),
-    PtrMotionAbs(u32, u32, u32, u32),
-    PtrButton(u32),
-    PtrAxis(Axis, f64),
-    PtrAxisDiscrete(Axis, f64, i32),
-    Macro(String, Vec<Action>),
-    Menu(String, Vec<(String, Action)>),
+    PtrMotion(f64, f64, Option<Modifiers>),
+    PtrMotionAbs(u32, u32, u32, u32, Option<Modifiers>),
+    PtrButton(u32, Option<Modifiers>),
+    PtrAxis(Axis, f64, Option<Modifiers>),
+    PtrAxisDiscrete(Axis, f64, i32, Option<Modifiers>),
+    Macro(String, Vec<Rc<Action>>),
+    Menu(String, Vec<(String, Rc<Action>)>),
 }
 
 impl Action {
-    pub fn reverse(&self) -> Action {
+    pub fn reverse(&self) -> Option<Action> {
         match self {
-            Action::None => Action::None,
-            Action::PtrMotion(dx, dy) => Action::PtrMotion(-dx, -dy),
-            Action::PtrAxis(axis, value) => Action::PtrAxis(*axis, -value),
-            Action::PtrAxisDiscrete(axis, value, discrete) => {
-                Action::PtrAxisDiscrete(*axis, -value, -discrete)
+            Action::None => Some(Action::None),
+            Action::PtrMotion(dx, dy, mods) => Some(Action::PtrMotion(-dx, -dy, mods.clone())),
+            Action::PtrAxis(axis, value, mods) => {
+                Some(Action::PtrAxis(*axis, -value, mods.clone()))
             }
-            _ => {
-                panic!("action cannot be trivially reversed: {:?}", self)
+            Action::PtrAxisDiscrete(axis, v, d, mods) => {
+                Some(Action::PtrAxisDiscrete(*axis, -v, -d, mods.clone()))
             }
+            _ => None,
+        }
+    }
+
+    pub fn with_modifiers(&self, modifiers: &Modifiers) -> Option<Action> {
+        let modmap = move |o: &Option<Modifiers>| {
+            o.clone()
+                .map(|m| m.union(modifiers))
+                .or(Some(modifiers.clone()))
+        };
+        match self {
+            Action::Mod(mods) => Some(Action::Mod(modmap(&Some(mods.clone())).unwrap())),
+            Action::Key(keycode, mods) => Some(Action::Key(*keycode, modmap(mods))),
+            Action::PtrMotion(dx, dy, mods) => Some(Action::PtrMotion(*dx, *dy, modmap(mods))),
+            Action::PtrMotionAbs(x, y, x_xt, y_xt, mods) => {
+                Some(Action::PtrMotionAbs(*x, *y, *x_xt, *y_xt, modmap(mods)))
+            }
+            Action::PtrButton(btn, mods) => Some(Action::PtrButton(*btn, modmap(mods))),
+            Action::PtrAxis(axis, value, mods) => {
+                Some(Action::PtrAxis(*axis, *value, modmap(mods)))
+            }
+            Action::PtrAxisDiscrete(axis, v, d, mods) => {
+                Some(Action::PtrAxisDiscrete(*axis, *v, *d, modmap(mods)))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Action {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let no_mods = Modifiers::default();
+        match self {
+            Action::None => write!(f, "none"),
+            Action::Mod(mods) => write!(f, "mods {}", mods),
+            Action::Key(key_code, mods) => {
+                let m = mods.as_ref().unwrap_or(&no_mods);
+                write!(f, "key {:?}{}", key_code, m)
+            }
+            Action::PtrMotion(x, y, mods) => {
+                let m = mods.as_ref().unwrap_or(&no_mods);
+                write!(f, "ptr_motion {} {} {}", x, y, m)
+            }
+            Action::PtrMotionAbs(x, y, x_ex, y_ex, mods) => write!(f, "unimpl"),
+            Action::PtrButton(btn, mods) => write!(f, "unimpl"),
+            Action::PtrAxis(axis, v, mods) => write!(f, "unimpl"),
+            Action::PtrAxisDiscrete(axis, v, d, mods) => write!(f, "unimpl"),
+            Action::Macro(name, _) => write!(f, "macro {}", name),
+            Action::Menu(name, _) => write!(f, "menu {}", name),
         }
     }
 }
 
 #[derive(Clone)]
-pub struct ActionFn(pub Rc<dyn Fn(Vec<String>) -> Action>);
+pub struct ActionFn(pub Rc<dyn Fn(&Vec<String>) -> Action>);
 
 impl ActionFn {
-    pub fn call(&self, args: Vec<String>) -> Action {
+    pub fn call(&self, args: &Vec<String>) -> Action {
         self.0(args)
     }
 }
@@ -81,7 +198,8 @@ impl fmt::Debug for ActionFn {
 #[derive(Debug)]
 pub struct ActionLibrary {
     parent: Option<Rc<ActionLibrary>>,
-    actions: HashMap<String, ActionFn>,
+    actions: HashMap<String, Rc<Action>>,
+    action_fns: HashMap<String, ActionFn>,
 }
 
 impl ActionLibrary {
@@ -89,22 +207,31 @@ impl ActionLibrary {
         ActionLibrary {
             parent,
             actions: HashMap::new(),
+            action_fns: HashMap::new(),
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&ActionFn> {
+    pub fn get(&self, key: &str, args: &Option<Vec<String>>) -> Option<Rc<Action>> {
         self.actions
             .get(key)
-            .or_else(|| self.parent.as_ref().and_then(|p| p.get(key)))
+            .map(|a| a.clone())
+            .or_else(|| {
+                self.action_fns.get(key).map(|func| {
+                    let args = args.as_ref().unwrap_or_else(|| {
+                        panic!("action '{}' requires arguments to be passed", key)
+                    });
+                    func.call(args).into()
+                })
+            })
+            .or_else(|| self.parent.as_ref().and_then(|p| p.get(key, args)))
     }
 
-    pub fn insert(&mut self, key: String, action: Action) -> Option<ActionFn> {
-        let func = ActionFn(Rc::new(move |_| action.clone()));
-        self.actions.insert(key, func)
+    pub fn insert(&mut self, key: String, action: Rc<Action>) -> Option<Rc<Action>> {
+        self.actions.insert(key, action)
     }
 
     pub fn insert_fn(&mut self, key: String, action: ActionFn) -> Option<ActionFn> {
-        self.actions.insert(key, action)
+        self.action_fns.insert(key, action)
     }
 }
 
@@ -113,20 +240,24 @@ impl Default for ActionLibrary {
         let mut library = Self {
             parent: None,
             actions: HashMap::new(),
+            action_fns: HashMap::new(),
         };
 
-        library.insert("none".to_string(), Action::None);
+        library.insert("none".to_string(), Action::None.into());
 
         for (key, value) in MODIFIERS.iter() {
-            library.insert(key.to_string(), Action::Mod(value.0, value.1));
+            library.insert(key.to_string(), Action::Mod(value.clone()).into());
         }
 
         for (key, value) in KEYCODES.iter() {
-            library.insert(key.to_string(), Action::Key(*value, None));
+            library.insert(key.to_string(), Action::Key(*value, None).into());
         }
 
         for (key, value) in BUTTONS.iter() {
-            library.insert(key.to_string(), Action::PtrButton(value.0 as u32));
+            library.insert(
+                key.to_string(),
+                Action::PtrButton(value.0 as u32, None).into(),
+            );
         }
 
         library.insert_fn(
@@ -135,6 +266,7 @@ impl Default for ActionLibrary {
                 Action::PtrMotion(
                     args.get(0).unwrap().parse().unwrap(),
                     args.get(1).unwrap().parse().unwrap(),
+                    None,
                 )
             })),
         );
@@ -147,6 +279,7 @@ impl Default for ActionLibrary {
                     args.get(1).unwrap().parse().unwrap(),
                     args.get(2).unwrap().parse().unwrap(),
                     args.get(3).unwrap().parse().unwrap(),
+                    None,
                 )
             })),
         );
@@ -154,7 +287,11 @@ impl Default for ActionLibrary {
         library.insert_fn(
             "ptr_wheel".to_string(),
             ActionFn(Rc::new(|args| {
-                Action::PtrAxis(Axis::VerticalScroll, args.get(0).unwrap().parse().unwrap())
+                Action::PtrAxis(
+                    Axis::VerticalScroll,
+                    args.get(0).unwrap().parse().unwrap(),
+                    None,
+                )
             })),
         );
 
@@ -164,6 +301,7 @@ impl Default for ActionLibrary {
                 Action::PtrAxis(
                     Axis::HorizontalScroll,
                     args.get(0).unwrap().parse().unwrap(),
+                    None,
                 )
             })),
         );
@@ -175,6 +313,7 @@ impl Default for ActionLibrary {
                     Axis::VerticalScroll,
                     args.get(0).unwrap().parse().unwrap(),
                     args.get(1).unwrap().parse().unwrap(),
+                    None,
                 )
             })),
         );
@@ -186,6 +325,7 @@ impl Default for ActionLibrary {
                     Axis::HorizontalScroll,
                     args.get(0).unwrap().parse().unwrap(),
                     args.get(1).unwrap().parse().unwrap(),
+                    None,
                 )
             })),
         );
@@ -195,32 +335,50 @@ impl Default for ActionLibrary {
 }
 
 lazy_static! {
-    static ref MODIFIERS: HashMap<&'static str, (Modifiers, Option<KeyCode>)> = {
+    static ref MODIFIERS: HashMap<&'static str, Modifiers> = {
         let mut m = HashMap::new();
-        m.insert("shift", (Modifiers::SHIFT, Some(KeyCode::KEY_LEFTSHIFT)));
-        m.insert("leftshift", (Modifiers::SHIFT, Some(KeyCode::KEY_LEFTSHIFT)));
-        m.insert("rightshift", (Modifiers::SHIFT, Some(KeyCode::KEY_RIGHTSHIFT)));
-        m.insert("capslock", (Modifiers::CAPSLOCK, Some(KeyCode::KEY_CAPSLOCK)));
-        m.insert("ctrl", (Modifiers::CTRL, Some(KeyCode::KEY_LEFTCTRL)));
-        m.insert("leftctrl", (Modifiers::CTRL, Some(KeyCode::KEY_LEFTCTRL)));
-        m.insert("rightctrl", (Modifiers::CTRL, Some(KeyCode::KEY_RIGHTCTRL)));
-        m.insert("mod1", (Modifiers::MOD1, None));
-        m.insert("mod2", (Modifiers::MOD2, None));
-        m.insert("mod3", (Modifiers::MOD3, None));
-        m.insert("mod4", (Modifiers::MOD4, None));
-        m.insert("mod5", (Modifiers::MOD5, None));
-        m.insert("numlock", (Modifiers::NUMLOCK, Some(KeyCode::KEY_NUMLOCK)));
-        m.insert("alt", (Modifiers::ALT, Some(KeyCode::KEY_LEFTALT)));
-        m.insert("leftalt", (Modifiers::ALT, Some(KeyCode::KEY_LEFTALT)));
-        m.insert("rightalt", (Modifiers::ALT, Some(KeyCode::KEY_RIGHTALT)));
-        m.insert("levelthree", (Modifiers::LEVELTHREE, None));
-        m.insert("super", (Modifiers::SUPER, None));
-        m.insert("levelfive", (Modifiers::LEVELFIVE, None));
-        m.insert("meta", (Modifiers::META, Some(KeyCode::KEY_LEFTMETA)));
-        m.insert("leftmeta", (Modifiers::META, Some(KeyCode::KEY_LEFTMETA)));
-        m.insert("rightmeta", (Modifiers::META, Some(KeyCode::KEY_RIGHTMETA)));
-        m.insert("hyper", (Modifiers::HYPER, None));
-        m.insert("scrolllock", (Modifiers::SCROLLLOCK, Some(KeyCode::KEY_SCROLLLOCK)));
+        m.insert("shift", Modifiers(ModifierFlags::SHIFT, vec![KeyCode::KEY_LEFTSHIFT]));
+        m.insert("leftshift", Modifiers(ModifierFlags::SHIFT, vec![KeyCode::KEY_LEFTSHIFT]));
+        m.insert("rightshift", Modifiers(ModifierFlags::SHIFT, vec![KeyCode::KEY_RIGHTSHIFT]));
+        m.insert("capslock", Modifiers(ModifierFlags::CAPSLOCK, vec![KeyCode::KEY_CAPSLOCK]));
+        m.insert("ctrl", Modifiers(ModifierFlags::CTRL, vec![KeyCode::KEY_LEFTCTRL]));
+        m.insert("leftctrl", Modifiers(ModifierFlags::CTRL, vec![KeyCode::KEY_LEFTCTRL]));
+        m.insert("rightctrl", Modifiers(ModifierFlags::CTRL, vec![KeyCode::KEY_RIGHTCTRL]));
+        m.insert("mod1", Modifiers(ModifierFlags::MOD1, Vec::new()));
+        m.insert("mod2", Modifiers(ModifierFlags::MOD2, Vec::new()));
+        m.insert("mod3", Modifiers(ModifierFlags::MOD3, Vec::new()));
+        m.insert("mod4", Modifiers(ModifierFlags::MOD4, Vec::new()));
+        m.insert("mod5", Modifiers(ModifierFlags::MOD5, Vec::new()));
+        m.insert("numlock", Modifiers(ModifierFlags::NUMLOCK, vec![KeyCode::KEY_NUMLOCK]));
+        m.insert("alt", Modifiers(ModifierFlags::ALT, vec![KeyCode::KEY_LEFTALT]));
+        m.insert("leftalt", Modifiers(ModifierFlags::ALT, vec![KeyCode::KEY_LEFTALT]));
+        m.insert("rightalt", Modifiers(ModifierFlags::ALT, vec![KeyCode::KEY_RIGHTALT]));
+        m.insert("levelthree", Modifiers(ModifierFlags::LEVELTHREE, Vec::new()));
+        m.insert("super", Modifiers(ModifierFlags::SUPER, Vec::new()));
+        m.insert("levelfive", Modifiers(ModifierFlags::LEVELFIVE, Vec::new()));
+        m.insert("meta", Modifiers(ModifierFlags::META, vec![KeyCode::KEY_LEFTMETA]));
+        m.insert("leftmeta", Modifiers(ModifierFlags::META, vec![KeyCode::KEY_LEFTMETA]));
+        m.insert("rightmeta", Modifiers(ModifierFlags::META, vec![KeyCode::KEY_RIGHTMETA]));
+        m.insert("hyper", Modifiers(ModifierFlags::HYPER, Vec::new()));
+        m.insert("scrolllock", Modifiers(ModifierFlags::SCROLLLOCK, vec![KeyCode::KEY_SCROLLLOCK]));
+        m
+    };
+
+    static ref SHORT_MODIFIERS: HashMap<&'static str, &'static str> = {
+        let mut m = HashMap::new();
+        m.insert("S", "shift");
+        m.insert("C", "ctrl");
+        m.insert("M1", "mod1");
+        m.insert("M2", "mod2");
+        m.insert("M3", "mod3");
+        m.insert("M4", "mod4");
+        m.insert("M5", "mod5");
+        m.insert("A", "alt");
+        m.insert("L3", "levelthree");
+        m.insert("SP", "super");
+        m.insert("L5", "levelfive");
+        m.insert("M", "meta");
+        m.insert("H", "hyper");
         m
     };
 
@@ -782,4 +940,41 @@ lazy_static! {
         m.insert("btn_trigger_happy40", KeyCode::BTN_TRIGGER_HAPPY40);
         m
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modifiers_can_lookup() {
+        assert_eq!(
+            Modifiers::lookup_mod("S"),
+            Some(Modifiers(
+                ModifierFlags::SHIFT,
+                vec![KeyCode::KEY_LEFTSHIFT]
+            ))
+        );
+        assert_eq!(Modifiers::lookup_mod("Q"), None);
+        assert_eq!(
+            Modifiers::lookup_mod("shift"),
+            Some(Modifiers(
+                ModifierFlags::SHIFT,
+                vec![KeyCode::KEY_LEFTSHIFT]
+            ))
+        );
+        assert_eq!(
+            Modifiers::lookup_mod("rightmeta"),
+            Some(Modifiers(ModifierFlags::META, vec![KeyCode::KEY_RIGHTMETA]))
+        );
+    }
+
+    #[test]
+    fn action_can_reverse() {
+        assert_eq!(Action::None.reverse(), Some(Action::None));
+        assert_eq!(
+            Action::PtrAxis(Axis::HorizontalScroll, 20.0, None).reverse(),
+            Some(Action::PtrAxis(Axis::HorizontalScroll, -20.0, None))
+        );
+    }
 }
