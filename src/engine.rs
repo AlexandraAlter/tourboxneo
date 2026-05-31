@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use log::info;
+use log::{info, warn};
 
 use crate::actions::{Action, Modifiers};
 use crate::config::{Bind, Config, ConfigManager, Rate};
@@ -428,10 +428,12 @@ impl Engine {
     fn handle_input(&mut self, input: Input) {
         let bind = self.code_to_bind(input.code);
         if bind.is_none() {
+            warn!("no binding for code");
             return;
         }
-        info!("{} -> {}", input, bind.as_ref().unwrap());
-        match bind.unwrap().as_ref() {
+        let bind = bind.unwrap();
+        info!("{} -> {} : {}", input, bind, bind.get_action(input.reverse));
+        match &*bind {
             Bind::Button(action) => {
                 if !input.release {
                     self.action_down(input.code, action.clone());

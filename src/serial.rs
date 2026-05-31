@@ -127,8 +127,13 @@ impl fmt::Display for Input {
 impl From<u8> for Input {
     fn from(value: u8) -> Self {
         let release = value & RELEASE != 0;
-        let reverse = value & REVERSE != 0;
+        let mut reverse = value & REVERSE != 0;
         let code = Code::try_from(value & CODE_MASK).expect("Invalid code");
+
+        // A horrific workaround for the fact that one scroll input comes through reversed
+        if code == Code::Knob {
+            reverse = !reverse;
+        }
 
         Input {
             code,

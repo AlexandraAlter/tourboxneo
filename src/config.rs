@@ -51,7 +51,8 @@ lazy_static! {
         Regex::new(
             r"(?x)
                 ^\s*(?P<action>[[:word:]]+)\s*
-                (?:\(\s*(?P<args>[[:word:]]+\s*(?:,\s*[[:word:]]+\s*)*)\s*\))?$
+                (?:\(\s*(?P<args>[[:word:]]+\s*(?:,\s*[[:word:]]+\s*)*)\s*\))?
+                \s*(?P<flags>(?::[[:word:]]+\s*)*)$
             ",
         )
         .expect("Regex failed to compile")
@@ -80,7 +81,7 @@ impl<'a> Lookup<'a> {
     ) -> Result<Rc<Action>, ConfigError> {
         self.0
             .get(str.as_ref(), &args)
-            .ok_or_else(|| ConfigError::new("", range))
+            .ok_or_else(|| ConfigError::new("action not found in library", range))
     }
 
     fn args(&self, args: Option<&str>) -> Option<Vec<String>> {
@@ -287,22 +288,28 @@ impl<'a> Lookup<'a> {
     }
 
     fn shortcut_bind(&self, str: Spanned<String>) -> Result<Rc<Action>, ConfigError> {
-        let captures = SHORTCUT_REGEX.captures(str.as_ref()).expect("Match failed");
+        let range = str.span();
+        let captures = SHORTCUT_REGEX
+            .captures(str.as_ref())
+            .ok_or_else(|| ConfigError::new("failed to match shortcut", range.clone()))?;
 
-        let action = captures
+        let action_str = captures
             .name("action")
             .expect("Missing action name")
             .as_str();
+        let args_str = captures.name("args").map(|a| a.as_str());
+        let flags_str = captures.name("flags").unwrap().as_str();
+        let (action, flags) =
+            self.action_and_flags(action_str, args_str, flags_str, range.clone())?;
 
-        let args = match captures.name("args") {
-            Some(args) => ARGUMENT_REGEX
-                .find_iter(args.as_str())
-                .map(|m| m.as_str().to_owned())
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
-        };
+        if !flags.is_empty() {
+            return Err(ConfigError::new(
+                "shortcut binds accept no other flags",
+                range.clone(),
+            ));
+        }
 
-        self.action(action, Some(args), str.span())
+        Ok(action.into())
     }
 
     fn library(&mut self) -> &mut ActionLibrary {
@@ -330,14 +337,42 @@ pub enum Bind {
     },
 }
 
+impl Bind {
+    pub fn get_action(&self, reverse: bool) -> &Action {
+        match self {
+            Bind::Button(action) => action,
+            Bind::ButtonUp(action) => action,
+            Bind::ButtonRepeat(action) => action,
+            Bind::ButtonAB(action_a, action_b) => {
+                if reverse {
+                    action_a
+                } else {
+                    action_b
+                }
+            }
+            Bind::Scroll { fwd, bak, rate: _ } => {
+                if reverse {
+                    fwd
+                } else {
+                    bak
+                }
+            }
+        }
+    }
+}
+
 impl fmt::Display for Bind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Bind::Button(action) => write!(f, "btn {}", action),
-            Bind::ButtonUp(action) => todo!(),
-            Bind::ButtonRepeat(action) => todo!(),
-            Bind::ButtonAB(action, action1) => todo!(),
-            Bind::Scroll { fwd, bak, rate } => todo!(),
+            Bind::Button(_a) => write!(f, "btn"),
+            Bind::ButtonUp(_a) => write!(f, "btnUp"),
+            Bind::ButtonRepeat(_a) => write!(f, "btnRep"),
+            Bind::ButtonAB(_a, _b) => write!(f, "btn A/B"),
+            Bind::Scroll {
+                fwd: _,
+                bak: _,
+                rate,
+            } => write!(f, "scroll at {:?}", rate),
         }
     }
 }
@@ -599,6 +634,7 @@ impl ConfigManager {
         let config = toml::from_str::<StringConfig>(&str)
             .expect("Unable to load config")
             .actualize(library)
+            .map_err(|mut e| e.with_exact_loc(&str))
             .unwrap();
         let name = config.name.clone();
         self.configs.push(Rc::new(config));
