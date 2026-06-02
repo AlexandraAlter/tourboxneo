@@ -88,7 +88,7 @@ impl fmt::Display for Modifiers {
                     ModifierFlags::SCROLLLOCK => "Sl",
                     _ => "?",
                 };
-                ":".to_owned() + mod_short
+                ":".to_string() + mod_short
             })
             .collect::<Vec<String>>()
             .join("");
@@ -112,8 +112,10 @@ pub enum Action {
     PtrButton(u32, Option<Modifiers>),
     PtrAxis(Axis, f64, Option<Modifiers>),
     PtrAxisDiscrete(Axis, f64, i32, Option<Modifiers>),
-    Macro(String, Vec<Rc<Action>>),
-    Menu(String, Vec<(String, Rc<Action>)>),
+    Shortcut(String),
+    Macro(String),
+    Menu(String),
+    Layer(Option<String>),
 }
 
 impl Action {
@@ -174,8 +176,13 @@ impl fmt::Display for Action {
             Action::PtrButton(btn, mods) => write!(f, "unimpl"),
             Action::PtrAxis(axis, v, mods) => write!(f, "unimpl"),
             Action::PtrAxisDiscrete(axis, v, d, mods) => write!(f, "unimpl"),
-            Action::Macro(name, _) => write!(f, "macro {}", name),
-            Action::Menu(name, _) => write!(f, "menu {}", name),
+            Action::Shortcut(name) => write!(f, "shortcut {}", name),
+            Action::Macro(name) => write!(f, "macro {}", name),
+            Action::Menu(name) => write!(f, "menu {}", name),
+            Action::Layer(name) => {
+                let name_or_base = name.as_ref().map(|s| s.as_ref()).unwrap_or_else(|| "base");
+                write!(f, "layer {}", name_or_base)
+            }
         }
     }
 }
@@ -244,6 +251,8 @@ impl Default for ActionLibrary {
         };
 
         library.insert("none".to_string(), Action::None.into());
+
+        library.insert("base".to_string(), Action::Layer(None).into());
 
         for (key, value) in MODIFIERS.iter() {
             library.insert(key.to_string(), Action::Mod(value.clone()).into());

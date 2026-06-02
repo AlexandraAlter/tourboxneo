@@ -1,10 +1,13 @@
-use std::{collections::HashMap, fmt, fs, ops::Range, path::PathBuf, rc::Rc};
+use std::{collections::HashMap, fmt, fs, marker::PhantomData, ops::Range, path::PathBuf, rc::Rc};
 
 use log::error;
 
 use lazy_static::lazy_static;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{
+    Deserialize,
+    de::{self, Visitor},
+};
 use toml::Spanned;
 
 use crate::{
@@ -525,30 +528,70 @@ impl Dial<Spanned<String>> {
 
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
+pub struct Shortcut<A> {
+    pub name: String,
+    pub action: A,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Macro<A> {
     pub name: String,
     pub actions: Vec<A>,
 }
 
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+pub enum MenuAnchor {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    #[default]
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl fmt::Display for MenuAnchor {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            MenuAnchor::TopLeft => write!(f, "top-left"),
+            MenuAnchor::Top => write!(f, "top"),
+            MenuAnchor::TopRight => write!(f, "top-right"),
+            MenuAnchor::Left => write!(f, "left"),
+            MenuAnchor::Center => write!(f, "center"),
+            MenuAnchor::Right => write!(f, "right"),
+            MenuAnchor::BottomLeft => write!(f, "bottom-left"),
+            MenuAnchor::Bottom => write!(f, "bottom"),
+            MenuAnchor::BottomRight => write!(f, "bottom-right"),
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct RawConfig<A, B> {
+pub struct Menu<A> {
     pub name: String,
+    pub message: Option<String>,
+    #[serde(default)]
+    pub anchor: MenuAnchor,
+    pub entries: Vec<A>,
+    pub select: Option<usize>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Layer<B> {
     pub prime: Option<Prime<B>>,
     pub kit: Option<Kit<B>>,
     pub knob: Option<Knob<B>>,
     pub scroll: Option<Knob<B>>,
     pub dial: Option<Dial<B>>,
-    #[serde(default = "HashMap::new")]
-    pub shortcuts: HashMap<String, A>,
-    #[serde(rename = "macro")]
-    #[serde(default = "Vec::new")]
-    pub macros: Vec<Macro<A>>,
-    #[serde(skip)]
-    pub library: Option<ActionLibrary>,
 }
 
-impl<A, B> RawConfig<A, B> {
+impl<B> Layer<B> {
     pub fn prime_ref(&self) -> Option<&Prime<B>> {
         self.prime.as_ref()
     }
@@ -570,43 +613,339 @@ impl<A, B> RawConfig<A, B> {
     }
 }
 
-pub type StringConfig = RawConfig<Spanned<String>, Spanned<String>>;
-pub type Config = RawConfig<Rc<Action>, Rc<Bind>>;
-
-impl StringConfig {
-    pub fn actualize(self, mut library: ActionLibrary) -> Result<Config, ConfigError> {
-        let mut lookup = Lookup(&mut library);
-
-        let mut new_shortcuts = HashMap::new();
-        for (key, str) in self.shortcuts.into_iter() {
-            let action = lookup.shortcut_bind(str)?;
-            lookup.library().insert(key.to_string(), action.clone());
-            new_shortcuts.insert(key.to_string(), action);
-        }
-
-        let mut new_macros = Vec::new();
-        for mac in self.macros.iter() {
-            let name = mac.name.to_string();
-            let actions = Vec::new();
-            let mac = Action::Macro(name.clone(), actions.clone());
-            lookup.library().insert(name.clone(), mac.into());
-            new_macros.push(Macro {
-                name: name.clone(),
-                actions: actions,
-            });
-        }
-
-        Ok(Config {
-            name: self.name,
+impl Layer<Spanned<String>> {
+    pub fn actualize(self, lookup: &Lookup) -> Layer<Rc<Bind>> {
+        Layer {
             prime: self.prime.map(|v| v.actualize(&lookup)),
             kit: self.kit.map(|v| v.actualize(&lookup)),
             knob: self.knob.map(|v| v.actualize(&lookup)),
             scroll: self.scroll.map(|v| v.actualize(&lookup)),
             dial: self.dial.map(|v| v.actualize(&lookup)),
-            shortcuts: new_shortcuts,
-            macros: new_macros,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RawConfig<A, B> {
+    pub name: String,
+    pub base: Layer<B>,
+    pub layers: HashMap<String, Layer<B>>,
+    pub shortcuts: HashMap<String, Shortcut<A>>,
+    pub macros: HashMap<String, Macro<A>>,
+    pub menus: HashMap<String, Rc<Menu<A>>>,
+    pub library: Option<ActionLibrary>,
+}
+
+pub type StringConfig = RawConfig<Spanned<String>, Spanned<String>>;
+pub type Config = RawConfig<Rc<Action>, Rc<Bind>>;
+
+pub static MENU_LAYER_TOML: &'static str = include_str!("menu_layer.toml");
+
+pub fn generate_menu_layer(lookup: &Lookup) -> Layer<Rc<Bind>> {
+    toml::from_str::<Layer<Spanned<String>>>(MENU_LAYER_TOML)
+        .unwrap()
+        .actualize(lookup)
+}
+
+impl Config {
+    pub fn lookup_name<'a>(&'a self, action: &'a Action) -> &'a str {
+        let base = "base";
+        match action {
+            Action::None => "None",
+            Action::Mod(modifiers) => "[mod]",
+            Action::Key(key_code, modifiers) => "[key]",
+            Action::PtrMotion(_, _, modifiers) => "[ptr_motion]",
+            Action::PtrMotionAbs(_, _, _, _, modifiers) => "[ptr_motion_abs]",
+            Action::PtrButton(_, modifiers) => "[ptr_button]",
+            Action::PtrAxis(axis, _, modifiers) => "[ptr_axis]",
+            Action::PtrAxisDiscrete(axis, _, _, modifiers) => "[ptr_axis_discrete]",
+            Action::Shortcut(name) => &self.shortcuts.get(name).expect("shortcut missing").name,
+            Action::Macro(name) => &self.macros.get(name).expect("macro missing").name,
+            Action::Menu(name) => &self.menus.get(name).expect("menu missing").name,
+            Action::Layer(name) => name.as_ref().map_or(base, |v| v),
+        }
+    }
+}
+
+impl StringConfig {
+    pub fn actualize(self, mut library: ActionLibrary) -> Result<Config, ConfigError> {
+        let mut lookup = Lookup(&mut library);
+
+        // actions are loaded into the library first, so they can be referenced in mappings
+
+        for (key, _shortcut) in self.shortcuts.iter() {
+            let action = Action::Shortcut(key.clone());
+            lookup.library().insert(key.clone(), action.into());
+        }
+
+        for (key, _macro) in self.macros.iter() {
+            let action = Action::Macro(key.clone());
+            lookup.library().insert(key.clone(), action.into());
+        }
+
+        for (key, _menu) in self.menus.iter() {
+            let action = Action::Menu(key.clone());
+            lookup.library().insert(key.clone(), action.into());
+        }
+
+        for (key, _layer) in self.layers.iter() {
+            let action = Action::Layer(Some(key.clone()));
+            lookup.library().insert(key.clone(), action.into());
+        }
+
+        let shortcuts = self
+            .shortcuts
+            .into_iter()
+            .map(|(key, c_shortcut)| {
+                let inner_action = lookup.shortcut_bind(c_shortcut.action)?;
+                Ok((
+                    key,
+                    Shortcut {
+                        name: c_shortcut.name,
+                        action: inner_action,
+                    },
+                ))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+
+        let macros = self
+            .macros
+            .into_iter()
+            .map(|(key, c_macro)| {
+                let inner_actions: Vec<_> = c_macro
+                    .actions
+                    .into_iter()
+                    .map(|a| lookup.shortcut_bind(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((
+                    key,
+                    Macro {
+                        name: c_macro.name,
+                        actions: inner_actions,
+                    },
+                ))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+
+        let menus = self
+            .menus
+            .into_iter()
+            .map(|(key, c_menu)| {
+                let entries: Vec<_> = c_menu
+                    .entries
+                    .clone()
+                    .into_iter()
+                    .map(|a| lookup.shortcut_bind(a))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((
+                    key,
+                    Menu {
+                        name: c_menu.name.clone(),
+                        message: c_menu.message.clone(),
+                        anchor: c_menu.anchor.clone(),
+                        entries: entries,
+                        select: c_menu.select,
+                    }
+                    .into(),
+                ))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+
+        // everything after this point has access to all of the config's actions
+
+        let base = self.base.actualize(&lookup);
+
+        let mut layers = self
+            .layers
+            .into_iter()
+            .map(|(key, layer)| {
+                if key == "menu" {
+                    panic!("layer cannot be named 'menu'")
+                }
+                (key.to_string(), layer.actualize(&lookup))
+            })
+            .collect::<HashMap<_, _>>();
+
+        layers.extend(HashMap::from([(
+            "menu".to_string(),
+            generate_menu_layer(&lookup),
+        )]));
+
+        Ok(Config {
+            name: self.name,
+            base: base,
+            layers,
+            shortcuts,
+            macros,
+            menus,
             library: Some(library),
         })
+    }
+}
+
+/// Manual implementation until `toml::Spanned` works alongside `#[serde(flatten)]`
+/// See: <https://github.com/toml-rs/toml/issues/589>
+impl<'de, A, B> Deserialize<'de> for RawConfig<A, B>
+where
+    A: serde::Deserialize<'de>,
+    B: serde::Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "lowercase")]
+        enum Field {
+            Name,
+            Prime,
+            Kit,
+            Knob,
+            Scroll,
+            Dial,
+            Layer,
+            Shortcut,
+            Macro,
+            Menu,
+        }
+
+        struct RawConfigVisitor<A, B> {
+            a: PhantomData<A>,
+            b: PhantomData<B>,
+        }
+
+        impl<'de, A, B> Visitor<'de> for RawConfigVisitor<A, B>
+        where
+            A: serde::Deserialize<'de>,
+            B: serde::Deserialize<'de>,
+        {
+            type Value = RawConfig<A, B>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct RawConfig")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut name = None;
+                let mut prime = None;
+                let mut kit = None;
+                let mut knob = None;
+                let mut scroll = None;
+                let mut dial = None;
+                let mut layers = None;
+                let mut shortcuts = None;
+                let mut macros = None;
+                let mut menus = None;
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Name => {
+                            if name.is_some() {
+                                return Err(de::Error::duplicate_field("name"));
+                            }
+                            name = Some(map.next_value()?);
+                        }
+                        Field::Prime => {
+                            if prime.is_some() {
+                                return Err(de::Error::duplicate_field("prime"));
+                            }
+                            prime = Some(map.next_value()?);
+                        }
+                        Field::Kit => {
+                            if kit.is_some() {
+                                return Err(de::Error::duplicate_field("kit"));
+                            }
+                            kit = Some(map.next_value()?);
+                        }
+                        Field::Knob => {
+                            if knob.is_some() {
+                                return Err(de::Error::duplicate_field("knob"));
+                            }
+                            knob = Some(map.next_value()?);
+                        }
+                        Field::Scroll => {
+                            if scroll.is_some() {
+                                return Err(de::Error::duplicate_field("scroll"));
+                            }
+                            scroll = Some(map.next_value()?);
+                        }
+                        Field::Dial => {
+                            if dial.is_some() {
+                                return Err(de::Error::duplicate_field("dial"));
+                            }
+                            dial = Some(map.next_value()?);
+                        }
+                        Field::Layer => {
+                            if layers.is_some() {
+                                return Err(de::Error::duplicate_field("layer"));
+                            }
+                            layers = Some(map.next_value()?);
+                        }
+                        Field::Shortcut => {
+                            if shortcuts.is_some() {
+                                return Err(de::Error::duplicate_field("shortcut"));
+                            }
+                            shortcuts = Some(map.next_value()?);
+                        }
+                        Field::Macro => {
+                            if macros.is_some() {
+                                return Err(de::Error::duplicate_field("macro"));
+                            }
+                            macros = Some(map.next_value()?);
+                        }
+                        Field::Menu => {
+                            if menus.is_some() {
+                                return Err(de::Error::duplicate_field("menu"));
+                            }
+                            menus = Some(
+                                map.next_value::<HashMap<_, Menu<_>>>()?
+                                    .into_iter()
+                                    .map(|(k, v)| (k, Rc::new(v)))
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
+                let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
+                Ok(RawConfig {
+                    name: name,
+                    base: Layer {
+                        prime,
+                        kit,
+                        knob,
+                        scroll,
+                        dial,
+                    },
+                    layers: layers.unwrap_or_else(|| HashMap::new()),
+                    shortcuts: shortcuts.unwrap_or_else(|| HashMap::new()),
+                    macros: macros.unwrap_or_else(|| HashMap::new()),
+                    menus: menus.unwrap_or_else(|| HashMap::new()),
+                    library: None,
+                })
+            }
+        }
+
+        const FIELDS: &[&str] = &[
+            "name",
+            "prime",
+            "kit",
+            "knob",
+            "scroll",
+            "dial",
+            "layer",
+            "shortcuts",
+            "macro",
+        ];
+        deserializer.deserialize_struct(
+            "RawConfig",
+            FIELDS,
+            RawConfigVisitor {
+                a: PhantomData,
+                b: PhantomData,
+            },
+        )
     }
 }
 
@@ -634,7 +973,7 @@ impl ConfigManager {
         let config = toml::from_str::<StringConfig>(&str)
             .expect("Unable to load config")
             .actualize(library)
-            .map_err(|mut e| e.with_exact_loc(&str))
+            .map_err(|e| e.with_exact_loc(&str))
             .unwrap();
         let name = config.name.clone();
         self.configs.push(Rc::new(config));

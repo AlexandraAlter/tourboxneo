@@ -2,14 +2,15 @@ mod actions;
 mod config;
 mod engine;
 mod error;
+mod menu;
 mod output;
 mod serial;
 mod timer;
 
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
 
 use clap::Parser;
-use mio::{Events, Interest, Poll, Token};
+use log::info;
 
 use crate::engine::Engine;
 
@@ -44,9 +45,6 @@ struct Args {
     quiet: bool,
 }
 
-const SERIAL: Token = Token(0);
-const REPEAT: Token = Token(1);
-
 fn main() {
     let args = Args::parse();
 
@@ -56,7 +54,7 @@ fn main() {
         .init()
         .unwrap();
 
-    println!("Startup complete at verbosity {}", args.verbose);
+    info!("Startup complete at verbosity {}", args.verbose);
 
     let mut engine = Engine::new(args.device);
 
@@ -65,26 +63,5 @@ fn main() {
         engine.set_config(&name)
     });
 
-    let mut poll = Poll::new().expect("MIO poll failed to start");
-    poll.registry()
-        .register(engine.get_serial(), SERIAL, Interest::READABLE)
-        .expect("MIO register failed");
-    poll.registry()
-        .register(engine.get_timer(), REPEAT, Interest::READABLE)
-        .unwrap();
-
-    let mut events = Events::with_capacity(128);
-
-    loop {
-        poll.poll(&mut events, Some(Duration::from_millis(100)))
-            .unwrap();
-
-        for event in events.iter() {
-            match event.token() {
-                SERIAL => engine.handle_serial(),
-                REPEAT => engine.handle_repeat(),
-                _ => {}
-            }
-        }
-    }
+    engine.run();
 }

@@ -1,16 +1,24 @@
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Read, Write};
+use std::iter;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use log::{info, warn};
+use mio::{Events, Interest, Poll, Token};
 
 use crate::actions::{Action, Modifiers};
-use crate::config::{Bind, Config, ConfigManager, Rate};
+use crate::config::{Bind, Config, ConfigManager, Layer, Rate};
+use crate::menu::FuzzelMenu;
 use crate::output::OutputDriver;
 use crate::serial::{self, Code, Input, SerialEventStream};
 use crate::timer::{ClockId, TimerFd};
+
+const SERIAL: Token = Token(0);
+const REPEAT: Token = Token(1);
+const FUZZEL_SENDER: Token = Token(2);
+const FUZZEL_RECEIVER: Token = Token(3);
 
 pub struct Tickers {
     knob: u8,
@@ -28,18 +36,58 @@ impl Tickers {
     }
 }
 
+pub enum EngineCmd {
+    /// Spawn a menu
+    Menu(FuzzelMenu),
+}
+
+/// Messages passed back up from the engine to the event loop
+pub struct EngineMsg {
+    cmds: Vec<EngineCmd>,
+}
+
+impl EngineMsg {
+    pub fn new() -> EngineMsg {
+        EngineMsg { cmds: Vec::new() }
+    }
+
+    pub fn add_cmd(&mut self, cmd: EngineCmd) {
+        self.cmds.push(cmd);
+    }
+
+    pub fn add_menu(&mut self, menu: FuzzelMenu) {
+        self.add_cmd(EngineCmd::Menu(menu));
+    }
+
+    pub fn append(&mut self, other: &mut EngineMsg) {
+        self.cmds.append(&mut other.cmds);
+    }
+
+    pub fn append_consume(&mut self, mut other: EngineMsg) {
+        self.cmds.append(&mut other.cmds);
+    }
+
+    pub fn get_cmds(self) -> Vec<EngineCmd> {
+        self.cmds
+    }
+}
+
 /// Central engine managing peripheral state
 pub struct Engine {
     /// Serial connection to the device
     serial: SerialEventStream,
     /// Timer for repeating keys
     timer: TimerFd,
+    /// Menu if menu active
+    menu: Option<FuzzelMenu>,
     /// Output for Wayland
     output: OutputDriver,
     /// Configuration management
     config_manager: ConfigManager,
     /// Track current config
     config: Rc<Config>,
+    /// Track current layer, or None for the base layer
+    layer: Option<String>,
     /// Held actions
     held_actions: HashMap<Code, Rc<Action>>,
     /// Held binds, for repeating events
@@ -50,8 +98,8 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(device_path: Option<PathBuf>) -> Engine {
-        let timer = TimerFd::new(ClockId::Monotonic).expect("Failed to build timer");
         let serial = SerialEventStream::new(serial::open(device_path));
+        let timer = TimerFd::new(ClockId::Monotonic).expect("failed to build timer");
 
         let output = OutputDriver::new();
 
@@ -61,9 +109,11 @@ impl Engine {
         Engine {
             serial: serial,
             timer: timer,
+            menu: None,
             output: output,
             config_manager: config_manager,
             config: config,
+            layer: None,
             held_actions: HashMap::new(),
             repeating_codes: Vec::new(),
             ticks: Tickers::new(),
@@ -113,7 +163,7 @@ impl Engine {
     }
 
     /// Given a code without a matching bind in the current config, return an appropriate fallback bind
-    fn code_to_fallback_bind(&self, input: Code) -> Option<Rc<Bind>> {
+    fn code_to_fallback_bind(&self, layer: &Layer<Rc<Bind>>, input: Code) -> Option<Rc<Bind>> {
         let code = match input {
             Code::TallDbl => Code::Tall,
             Code::SideDbl => Code::Side,
@@ -155,170 +205,183 @@ impl Engine {
 
             _ => return None,
         };
-        self.code_to_bind(code)
+        self.code_to_bind_inner(layer, code)
     }
 
-    fn code_to_bind(&self, input: Code) -> Option<Rc<Bind>> {
-        let config = &self.config;
+    fn code_to_bind_inner(&self, layer: &Layer<Rc<Bind>>, input: Code) -> Option<Rc<Bind>> {
         match input {
-            Code::Tall => config.prime_ref().and_then(|v| v.tall.clone()),
-            Code::Side => config.prime_ref().and_then(|v| v.side.clone()),
-            Code::Top => config.prime_ref().and_then(|v| v.top.clone()),
-            Code::Short => config.prime_ref().and_then(|v| v.short.clone()),
-            Code::TallDbl => config
+            Code::Tall => layer.prime_ref().and_then(|v| v.tall.clone()),
+            Code::Side => layer.prime_ref().and_then(|v| v.side.clone()),
+            Code::Top => layer.prime_ref().and_then(|v| v.top.clone()),
+            Code::Short => layer.prime_ref().and_then(|v| v.short.clone()),
+            Code::TallDbl => layer
                 .prime_ref()
                 .and_then(|v| v.tall_x2.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::SideDbl => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::SideDbl => layer
                 .prime_ref()
                 .and_then(|v| v.side_x2.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::ShortDbl => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::ShortDbl => layer
                 .prime_ref()
                 .and_then(|v| v.short_x2.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::TopDbl => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::TopDbl => layer
                 .prime_ref()
                 .and_then(|v| v.top_x2.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
 
-            Code::SideTop => config
+            Code::SideTop => layer
                 .prime_ref()
                 .and_then(|v| v.side_top.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::SideTall => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::SideTall => layer
                 .prime_ref()
                 .and_then(|v| v.side_tall.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::SideShort => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::SideShort => layer
                 .prime_ref()
                 .and_then(|v| v.side_short.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::TopTall => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::TopTall => layer
                 .prime_ref()
                 .and_then(|v| v.top_tall.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::TopShort => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::TopShort => layer
                 .prime_ref()
                 .and_then(|v| v.top_short.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::TallShort => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::TallShort => layer
                 .prime_ref()
                 .and_then(|v| v.tall_short.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
 
-            Code::Tour => config.kit_ref().and_then(|v| v.tour.clone()),
+            Code::Tour => layer.kit_ref().and_then(|v| v.tour.clone()),
 
-            Code::Up => config
+            Code::Up => layer
                 .kit_ref()
                 .and_then(|v| v.dpad_ref().and_then(|v| v.up.clone())),
-            Code::Down => config
+            Code::Down => layer
                 .kit_ref()
                 .and_then(|v| v.dpad_ref().and_then(|v| v.down.clone())),
-            Code::Left => config
+            Code::Left => layer
                 .kit_ref()
                 .and_then(|v| v.dpad_ref().and_then(|v| v.left.clone())),
-            Code::Right => config
+            Code::Right => layer
                 .kit_ref()
                 .and_then(|v| v.dpad_ref().and_then(|v| v.right.clone())),
 
-            Code::SideUp => config
+            Code::SideUp => layer
                 .kit_ref()
                 .and_then(|v| v.side_dpad_ref().and_then(|v| v.up.clone()))
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::SideDown => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::SideDown => layer
                 .kit_ref()
                 .and_then(|v| v.side_dpad_ref().and_then(|v| v.down.clone()))
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::SideLeft => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::SideLeft => layer
                 .kit_ref()
                 .and_then(|v| v.side_dpad_ref().and_then(|v| v.left.clone()))
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::SideRight => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::SideRight => layer
                 .kit_ref()
                 .and_then(|v| v.side_dpad_ref().and_then(|v| v.right.clone()))
-                .or_else(|| self.code_to_fallback_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
 
-            Code::TopUp => config
+            Code::TopUp => layer
                 .kit_ref()
                 .and_then(|v| v.top_dpad_ref().and_then(|v| v.up.clone()))
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::TopDown => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::TopDown => layer
                 .kit_ref()
                 .and_then(|v| v.top_dpad_ref().and_then(|v| v.down.clone()))
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::TopLeft => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::TopLeft => layer
                 .kit_ref()
                 .and_then(|v| v.top_dpad_ref().and_then(|v| v.left.clone()))
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::TopRight => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::TopRight => layer
                 .kit_ref()
                 .and_then(|v| v.top_dpad_ref().and_then(|v| v.right.clone()))
-                .or_else(|| self.code_to_fallback_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
 
-            Code::C1 => config.kit_ref().and_then(|v| v.c1.clone()),
-            Code::C2 => config.kit_ref().and_then(|v| v.c2.clone()),
+            Code::C1 => layer.kit_ref().and_then(|v| v.c1.clone()),
+            Code::C2 => layer.kit_ref().and_then(|v| v.c2.clone()),
 
-            Code::TallC1 => config
+            Code::TallC1 => layer
                 .kit_ref()
                 .and_then(|v| v.tall_c1.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::TallC2 => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::TallC2 => layer
                 .kit_ref()
                 .and_then(|v| v.tall_c2.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
 
-            Code::ShortC1 => config
+            Code::ShortC1 => layer
                 .kit_ref()
                 .and_then(|v| v.short_c1.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::ShortC2 => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::ShortC2 => layer
                 .kit_ref()
                 .and_then(|v| v.short_c2.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
 
-            Code::KnobButton => config.knob_ref().and_then(|v| v.press.clone()),
-            Code::Knob => config.knob_ref().and_then(|v| v.turn.clone()),
-            Code::TallKnob => config
+            Code::KnobButton => layer.knob_ref().and_then(|v| v.press.clone()),
+            Code::Knob => layer.knob_ref().and_then(|v| v.turn.clone()),
+            Code::TallKnob => layer
                 .knob_ref()
                 .and_then(|v| v.tall_turn.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::ShortKnob => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::ShortKnob => layer
                 .knob_ref()
                 .and_then(|v| v.short_turn.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::TopKnob => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::TopKnob => layer
                 .knob_ref()
                 .and_then(|v| v.top_turn.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::SideKnob => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::SideKnob => layer
                 .knob_ref()
                 .and_then(|v| v.side_turn.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
 
-            Code::ScrollButton => config.scroll_ref().and_then(|v| v.press.clone()),
-            Code::Scroll => config.scroll_ref().and_then(|v| v.turn.clone()),
-            Code::TallScroll => config
+            Code::ScrollButton => layer.scroll_ref().and_then(|v| v.press.clone()),
+            Code::Scroll => layer.scroll_ref().and_then(|v| v.turn.clone()),
+            Code::TallScroll => layer
                 .scroll_ref()
                 .and_then(|v| v.tall_turn.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::ShortScroll => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::ShortScroll => layer
                 .scroll_ref()
                 .and_then(|v| v.short_turn.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::TopScroll => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::TopScroll => layer
                 .scroll_ref()
                 .and_then(|v| v.top_turn.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
-            Code::SideScroll => config
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
+            Code::SideScroll => layer
                 .scroll_ref()
                 .and_then(|v| v.side_turn.clone())
-                .or_else(|| self.code_to_fallback_bind(input)),
+                .or_else(|| self.code_to_fallback_bind(layer, input)),
 
-            Code::DialButton => config.dial_ref().and_then(|v| v.press.clone()),
-            Code::Dial => config.dial_ref().and_then(|v| v.turn.clone()),
+            Code::DialButton => layer.dial_ref().and_then(|v| v.press.clone()),
+            Code::Dial => layer.dial_ref().and_then(|v| v.turn.clone()),
 
             _ => panic!("Impossible code received"),
+        }
+    }
+
+    /// There's a series of fallbacks to this functio
+    /// First it checks the current layer (if on a layer), then any fallbacks on the current layer
+    /// Then it checks the base layer, then any fallbacks on the base layer
+    fn code_to_bind(&self, input: Code) -> Option<Rc<Bind>> {
+        match self.layer.as_ref() {
+            Some(l) => {
+                let layer = &self.config.layers.get(l).expect("layer went missing");
+                self.code_to_bind_inner(layer, input)
+                    .or_else(|| self.code_to_bind_inner(&self.config.base, input))
+            }
+            None => self.code_to_bind_inner(&self.config.base, input),
         }
     }
 
@@ -344,7 +407,8 @@ impl Engine {
         self.output.mod_remove(*mods.flags());
     }
 
-    fn action_down(&mut self, code: Code, action: Rc<Action>) {
+    fn action_down(&mut self, code: Code, action: Rc<Action>) -> EngineMsg {
+        let mut msg = EngineMsg::new();
         self.held_actions.insert(code, action.clone());
         match &*action {
             Action::None => {}
@@ -382,18 +446,50 @@ impl Engine {
                 self.output.ptr_axis_stop(*axis);
                 self.output.ptr_frame();
             }
-            Action::Macro(_, actions) => {
-                for a in actions {
+            Action::Shortcut(name) => {
+                let shortcut = self.config.shortcuts.get(name).expect("macro missing");
+                msg.append_consume(self.action_down(code, shortcut.action.clone()));
+            }
+            Action::Macro(name) => {
+                let r#macro = self.config.macros.get(name).expect("macro missing");
+                let macro_actions = r#macro
+                    .actions
+                    .iter()
+                    .map(|a| a.clone())
+                    .collect::<Vec<_>>();
+                for a in macro_actions {
                     self.action_down(Code::Macro, a.clone());
                     self.action_up(Code::Macro, a.clone());
                 }
             }
-            Action::Menu(_, _items) => todo!(),
+            Action::Menu(name) => {
+                let menu = self.config.menus.get(name).expect("menu missing");
+                msg.add_menu(FuzzelMenu::new(menu.clone(), self.layer.clone()));
+                self.layer = Some("menu".to_string());
+            }
+            Action::Layer(Some(name)) => {
+                info!("moved to layer {}", name);
+                if self.config.layers.get(name).is_none() {
+                    panic!("assigned an invalid layer {}", name);
+                }
+                self.layer = Some(name.to_owned());
+            }
+            Action::Layer(None) => {
+                info!("moved to layer base");
+                self.layer = None;
+            }
         };
+        msg
     }
 
     fn action_up(&mut self, code: Code, action: Rc<Action>) {
-        self.held_actions.remove(&code);
+        let held_action_opt = self.held_actions.remove(&code);
+        if let Some(held_action) = held_action_opt {
+            if held_action != action {
+                // we've changed layer, release the old action
+                self.action_up(code, held_action);
+            }
+        }
         match &*action {
             Action::None => {}
             Action::Mod(mods) => {
@@ -420,37 +516,43 @@ impl Engine {
             Action::PtrAxisDiscrete(_, _, _, mods) => {
                 mods.as_ref().map(|m| self.mods_up(&m));
             }
-            Action::Macro(_, _actions) => {}
-            Action::Menu(_, _items) => todo!(),
+            Action::Shortcut(name) => {
+                let shortcut = self.config.shortcuts.get(name).expect("macro missing");
+                self.action_up(code, shortcut.action.clone())
+            }
+            Action::Macro(_) => {}
+            Action::Menu(_) => {}
+            Action::Layer(_) => {}
         };
     }
 
-    fn handle_input(&mut self, input: Input) {
+    fn handle_input(&mut self, input: Input) -> EngineMsg {
+        let mut msg = EngineMsg::new();
         let bind = self.code_to_bind(input.code);
         if bind.is_none() {
             warn!("no binding for code");
-            return;
+            return msg;
         }
         let bind = bind.unwrap();
         info!("{} -> {} : {}", input, bind, bind.get_action(input.reverse));
         match &*bind {
             Bind::Button(action) => {
                 if !input.release {
-                    self.action_down(input.code, action.clone());
+                    msg.append_consume(self.action_down(input.code, action.clone()));
                 } else {
                     self.action_up(input.code, action.clone());
                 }
             }
             Bind::ButtonUp(action) => {
                 if input.release {
-                    self.action_down(input.code, action.clone());
+                    msg.append_consume(self.action_down(input.code, action.clone()));
                     self.action_up(input.code, action.clone());
                 }
             }
             Bind::ButtonRepeat(action) => {
                 if !input.release {
                     self.repeating_codes.push(input.code);
-                    self.action_down(input.code, action.clone());
+                    msg.append_consume(self.action_down(input.code, action.clone()));
                     self.timer.set_timeout(&Duration::from_millis(100)).unwrap();
                 } else {
                     self.repeating_codes.retain(|c| *c != input.code);
@@ -460,10 +562,10 @@ impl Engine {
             }
             Bind::ButtonAB(action_a, action_b) => {
                 if !input.release {
-                    self.action_down(input.code, action_a.clone());
+                    msg.append_consume(self.action_down(input.code, action_a.clone()));
                     self.action_up(input.code, action_a.clone());
                 } else {
-                    self.action_down(input.code, action_b.clone());
+                    msg.append_consume(self.action_down(input.code, action_b.clone()));
                     self.action_up(input.code, action_b.clone());
                 }
             }
@@ -481,25 +583,55 @@ impl Engine {
                     Rate::Slower => 3,
                 };
                 if counter % modulo == 0 {
-                    let act = if input.reverse { bak } else { fwd };
+                    let action = if input.reverse { bak } else { fwd };
                     if !input.release {
-                        self.action_down(input.code, act.clone());
-                        self.action_up(input.code, act.clone());
+                        msg.append_consume(self.action_down(input.code, action.clone()));
+                        self.action_up(input.code, action.clone());
                     }
                 }
             }
         }
+        msg
     }
 
-    pub fn handle_serial(&mut self) {
+    pub fn register_fuzzel_pipe(&mut self, poll: &mut Poll, mut menu: FuzzelMenu) {
+        info!("fuzzel cmd");
+        if let Some(_) = &self.menu {
+            warn!("killing duplicate menu");
+            self.deregister_fuzzel_pipe(poll);
+        };
+        poll.registry()
+            .register(menu.receiver(), FUZZEL_RECEIVER, Interest::READABLE)
+            .unwrap();
+        poll.registry()
+            .register(menu.sender(), FUZZEL_SENDER, Interest::WRITABLE)
+            .unwrap();
+        self.menu = Some(menu);
+    }
+
+    pub fn deregister_fuzzel_pipe(&mut self, poll: &mut Poll) {
+        poll.registry()
+            .deregister(self.menu.as_mut().unwrap().sender())
+            .unwrap();
+        poll.registry()
+            .deregister(self.menu.as_mut().unwrap().receiver())
+            .unwrap();
+        self.menu = None;
+    }
+
+    pub fn handle_serial(&mut self) -> EngineMsg {
+        let mut msg = EngineMsg::new();
         loop {
             match self.serial.next() {
-                Some(Ok(input)) => self.handle_input(input),
+                Some(Ok(input)) => {
+                    msg.append_consume(self.handle_input(input));
+                }
                 Some(Err(ref err)) if would_block(err) => break,
                 Some(Err(err)) => panic!("{}", err),
                 None => break,
             }
         }
+        msg
     }
 
     pub fn handle_repeat(&mut self) {
@@ -507,6 +639,75 @@ impl Engine {
         self.timer.set_timeout(&Duration::from_millis(10)).unwrap();
         let timeout_num = self.timer.read().unwrap();
         assert!(timeout_num == 1);
+    }
+
+    pub fn handle_fuzzel(&mut self) {
+        // let action = match &mut self.fuzzel {
+        //     Some(rec) => read_fuzzel_result(rec),
+        //     None => panic!("fuzzel callback but no receiver was present"),
+        // };
+        let action = "?";
+        warn!("fuzzel reports: {:?}", action);
+    }
+
+    pub fn run(&mut self) {
+        let mut poll = Poll::new().expect("MIO poll failed to start");
+        poll.registry()
+            .register(self.get_serial(), SERIAL, Interest::READABLE)
+            .expect("MIO register failed");
+        poll.registry()
+            .register(self.get_timer(), REPEAT, Interest::READABLE)
+            .unwrap();
+
+        let mut events = Events::with_capacity(128);
+
+        loop {
+            poll.poll(&mut events, Some(Duration::from_millis(100)))
+                .unwrap();
+
+            for event in events.iter() {
+                match event.token() {
+                    SERIAL => {
+                        let msg = self.handle_serial();
+                        for cmd in msg.get_cmds().into_iter() {
+                            match cmd {
+                                EngineCmd::Menu(menu) => {
+                                    self.register_fuzzel_pipe(&mut poll, menu);
+                                }
+                            }
+                        }
+                    }
+                    REPEAT => self.handle_repeat(),
+                    FUZZEL_SENDER if event.is_write_closed() => {
+                        info!("fuzzel sender closed");
+                        let menu = self.menu.as_mut().expect("menu destroyed before recv");
+                        self.layer = menu.last_layer().clone();
+                        self.deregister_fuzzel_pipe(&mut poll);
+                    }
+                    FUZZEL_SENDER => {
+                        info!("fuzzel sender hit");
+                        let menu = self.menu.as_mut().expect("menu destroyed before send");
+                        let stdin = menu.get_stdin(&self.config);
+                        menu.sender()
+                            .write_all(stdin.as_bytes())
+                            .expect("failed to write menu to fuzzel");
+                    }
+                    FUZZEL_RECEIVER if event.is_read_closed() => {
+                        info!("fuzzel receiver closed");
+                    }
+                    FUZZEL_RECEIVER => {
+                        info!("fuzzel receiver event");
+                        let menu = self.menu.as_mut().expect("menu destroyed before recv");
+                        let mut str = String::new();
+                        menu.receiver()
+                            .read_to_string(&mut str)
+                            .expect("failed to read result from fuzzel");
+                        println!("{}", str);
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 

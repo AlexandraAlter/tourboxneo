@@ -31,7 +31,7 @@ impl ConfigError {
         }
     }
 
-    pub fn with_exact_loc(&mut self, config: &str) -> Self {
+    pub fn with_exact_loc(&self, config: &str) -> Self {
         match &self.loc {
             Location::Raw(range) => {
                 let conf = &config[0..range.start];
@@ -46,8 +46,8 @@ impl ConfigError {
                     }
                 }
                 let loc = Location::Exact {
-                    row,
-                    col,
+                    row: row + 1,
+                    col: col + 1,
                     len: range.len(),
                 };
                 ConfigError { msg: self.msg, loc }
@@ -60,5 +60,24 @@ impl ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Config error, {}: {}", self.msg, self.loc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ConfigError;
+
+    #[test]
+    fn parses_exact_loc() {
+        let error = ConfigError::new("", 10..14);
+        let exact_error = error.with_exact_loc("test\ntest\ntest\ntest");
+        if let Location::Exact { row, col, len } = exact_error.loc {
+            assert_eq!(row, 3);
+            assert_eq!(col, 1);
+            assert_eq!(len, 4);
+        } else {
+            panic!("should contain exact location")
+        }
     }
 }

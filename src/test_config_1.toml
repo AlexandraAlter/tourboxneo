@@ -56,6 +56,22 @@ short_turn = "t"
 press = "b"
 turn = "t"
 
+[layer.lighttable.prime]
+side = "b"
+side_x2 = "b"
+top = "b"
+top_x2 = "b"
+tall = "b"
+tall_x2 = "b"
+short = "b"
+short_x2 = "b"
+side_top = "b"
+side_tall = "b"
+side_short = "b"
+top_tall = "b"
+top_short = "b"
+tall_short = "b"
+
 [shortcuts]
 a = "b"
 b = "b"

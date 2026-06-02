@@ -96,7 +96,9 @@ pub enum Code {
     Dial = 0x0f,
 
     /// Dummy value used in `Engine::held_actions` for ongoing macro invocations
-    Macro = 0xff,
+    Macro = 0xfe,
+    /// Dummy value used in `Engine::` for ongoing menu invocations
+    Menu = 0xff,
 }
 
 impl fmt::Display for Code {

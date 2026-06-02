@@ -1,0 +1,28 @@
+[prime]
+side = "esc"
+top = "esc"
+tall = "enter"
+short = "esc"
+
+[kit]
+tour = "esc"
+c1 = "esc"
+c2 = "esc"
+
+[kit.dpad]
+up = "esc"
+down = "esc"
+left = "esc"
+right = "esc"
+
+[knob]
+press = "none"
+turn = "down/up"
+
+[scroll]
+press = "none"
+turn = "down/up"
+
+[dial]
+press = "none"
+turn = "down/up"
