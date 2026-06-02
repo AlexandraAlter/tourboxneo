@@ -56,7 +56,7 @@ short_turn = "t"
 press = "b"
 turn = "t"
 
-[layer.lighttable.prime]
+[layer.test.prime]
 side = "b"
 side_x2 = "b"
 top = "b"
