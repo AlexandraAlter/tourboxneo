@@ -30,17 +30,12 @@ impl FuzzelMenu {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .expect("failed to launch fuzzel");
+            .expect("fuzzel should launch");
 
-        let sender = Sender::from(child.stdin.take().expect("failed to open fuzzel stdin"));
-        let receiver = Receiver::from(child.stdout.take().expect("failed to open fuzzel stdout"));
+        let sender = Sender::from(child.stdin.take().expect("fuzzel stdin should open"));
+        let receiver = Receiver::from(child.stdout.take().expect("fuzzel stdout should open"));
 
-        Self {
-            menu,
-            sender,
-            receiver,
-            last_layer,
-        }
+        Self { menu, sender, receiver, last_layer }
     }
 
     pub fn get_stdin(&self, config: &Config) -> String {
@@ -64,14 +59,13 @@ impl FuzzelMenu {
         &self.last_layer
     }
 
-    pub fn read(&mut self) -> Result<Option<Rc<Action>>, io::Error> {
+    pub fn read_action(&mut self) -> Result<Option<Rc<Action>>, io::Error> {
         let mut buf = String::new();
         self.receiver.read_to_string(&mut buf)?;
         let index = match buf.strip_suffix("\n") {
             Some(str) => str.parse::<usize>().unwrap(),
             None => return Ok(None),
         };
-
         Ok(self.menu.entries.get(index).cloned())
     }
 }

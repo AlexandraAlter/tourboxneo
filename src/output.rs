@@ -51,12 +51,7 @@ impl Dispatch<WlRegistry, ()> for SessionState {
         _: &Connection,
         qhandle: &QueueHandle<SessionState>,
     ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
+        if let wl_registry::Event::Global { name, interface, version } = event {
             match interface.as_str() {
                 "zwp_virtual_keyboard_manager_v1" => {
                     state.keyboard_manager = Some(registry.bind(name, version, &qhandle, ()))
@@ -106,9 +101,7 @@ impl Dispatch<WlSeat, ()> for SessionState {
         _conn: &Connection,
         qhandle: &QueueHandle<SessionState>,
     ) {
-        if let wl_seat::Event::Capabilities {
-            capabilities: WEnum::Value(capabilities),
-        } = event
+        if let wl_seat::Event::Capabilities { capabilities: WEnum::Value(capabilities) } = event
             && capabilities.contains(wl_seat::Capability::Keyboard)
             && let Some(keyboard_manager) = &state.keyboard_manager
             && let Some(pointer_manager) = &state.pointer_manager
@@ -117,11 +110,7 @@ impl Dispatch<WlSeat, ()> for SessionState {
             let pointer = pointer_manager.create_virtual_pointer(Some(seat), qhandle, ());
 
             let (keymap, keymap_len) = get_keymap_as_file();
-            keyboard.keymap(
-                wl_keyboard::KeymapFormat::XkbV1.into(),
-                keymap.as_fd(),
-                keymap_len,
-            );
+            keyboard.keymap(wl_keyboard::KeymapFormat::XkbV1.into(), keymap.as_fd(), keymap_len);
 
             state.keyboard = Some(keyboard);
             state.pointer = Some(pointer);
@@ -156,24 +145,14 @@ impl Dispatch<ZwlrVirtualPointerV1, ()> for SessionState {
 fn get_keymap_as_file() -> (File, u32) {
     let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
 
-    let keymap = xkb::Keymap::new_from_names(
-        &context,
-        "",
-        "",
-        "us",
-        "",
-        None,
-        xkb::KEYMAP_COMPILE_NO_FLAGS,
-    )
-    .expect("xkbcommon keymap panicked!");
+    let keymap =
+        xkb::Keymap::new_from_names(&context, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
+            .expect("xkbcommon shuold accept keymap");
     let xkb_state = xkb::State::new(&keymap);
-    let keymap = xkb_state
-        .get_keymap()
-        .get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let mut file = tempfile::tempfile_in(dir).expect("File could not be created!");
+    let keymap = xkb_state.get_keymap().get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+    let dir =
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let mut file = tempfile::tempfile_in(dir).expect("tempfile should be written");
     file.write_all(keymap.as_bytes()).unwrap();
     file.flush().unwrap();
     (file, keymap.len() as u32)
@@ -227,33 +206,21 @@ impl OutputDriver {
 
     pub fn key_press(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
-            keyboard.key(
-                self.get_cur_ms(),
-                key.code().into(),
-                KeyState::Pressed.into(),
-            );
+            keyboard.key(self.get_cur_ms(), key.code().into(), KeyState::Pressed.into());
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
     }
 
     pub fn key_repeat(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
-            keyboard.key(
-                self.get_cur_ms(),
-                key.code().into(),
-                KeyState::Repeated.into(),
-            );
+            keyboard.key(self.get_cur_ms(), key.code().into(), KeyState::Repeated.into());
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
     }
 
     pub fn key_release(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
-            keyboard.key(
-                self.get_cur_ms(),
-                key.code().into(),
-                KeyState::Released.into(),
-            );
+            keyboard.key(self.get_cur_ms(), key.code().into(), KeyState::Released.into());
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
     }
@@ -305,12 +272,7 @@ impl OutputDriver {
 
     fn update_state(&mut self) {
         if let Some(keyboard) = &self.session_state.keyboard {
-            keyboard.modifiers(
-                self.modifiers.bits(),
-                self.latches.bits(),
-                self.locks.bits(),
-                0,
-            );
+            keyboard.modifiers(self.modifiers.bits(), self.latches.bits(), self.locks.bits(), 0);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
     }
@@ -331,11 +293,7 @@ impl OutputDriver {
 
     pub fn ptr_button(&mut self, button: u32, released: bool) {
         if let Some(pointer) = &self.session_state.pointer {
-            let state = if released {
-                ButtonState::Released
-            } else {
-                ButtonState::Pressed
-            };
+            let state = if released { ButtonState::Released } else { ButtonState::Pressed };
             pointer.button(self.get_cur_ms(), button, state);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }

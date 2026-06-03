@@ -34,7 +34,7 @@ lazy_static! {
                 \s*(?P<flags>(?::[[:word:]]+\s*)*)$
             ",
         )
-        .expect("Regex failed to compile")
+        .expect("regex should compile")
     };
     static ref DOUBLE_REGEX: Regex = {
         Regex::new(
@@ -48,7 +48,7 @@ lazy_static! {
                 \s*(?P<alt_flags>(?::[[:word:]]+\s*)*)$
             ",
         )
-        .expect("Regex failed to compile")
+        .expect("regex should compile")
     };
     static ref SHORTCUT_REGEX: Regex = {
         Regex::new(
@@ -58,10 +58,10 @@ lazy_static! {
                 \s*(?P<flags>(?::[[:word:]]+\s*)*)$
             ",
         )
-        .expect("Regex failed to compile")
+        .expect("regex should compile")
     };
-    static ref ARGUMENT_REGEX: Regex = Regex::new(r"[[:word:]]+").expect("Regex failed to compile");
-    static ref FLAG_REGEX: Regex = Regex::new(r":[[:word:]]+").expect("Regex failed to compile");
+    static ref ARGUMENT_REGEX: Regex = Regex::new(r"[[:word:]]+").expect("regex should compile");
+    static ref FLAG_REGEX: Regex = Regex::new(r":[[:word:]]+").expect("regex should compile");
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -90,10 +90,7 @@ impl<'a> Lookup<'a> {
     fn args(&self, args: Option<&str>) -> Option<Vec<String>> {
         match args {
             Some(args) => Some(
-                ARGUMENT_REGEX
-                    .find_iter(args)
-                    .map(|m| m.as_str().to_owned())
-                    .collect::<Vec<_>>(),
+                ARGUMENT_REGEX.find_iter(args).map(|m| m.as_str().to_owned()).collect::<Vec<_>>(),
             ),
             None => None,
         }
@@ -115,12 +112,7 @@ impl<'a> Lookup<'a> {
             return Err(ConfigError::new("unrecogized flag", range));
         }
         let flag_vec: Vec<_> = flag_vec.iter().flatten().cloned().collect();
-        if flag_vec
-            .iter()
-            .filter(|f| vec![Flag::Up, Flag::Repeat].contains(*f))
-            .count()
-            > 1
-        {
+        if flag_vec.iter().filter(|f| vec![Flag::Up, Flag::Repeat].contains(*f)).count() > 1 {
             return Err(ConfigError::new("multiple mode-setting flags", range));
         }
         if flag_vec
@@ -161,9 +153,7 @@ impl<'a> Lookup<'a> {
         }
 
         if !mods.is_empty() {
-            let modifiers = mods
-                .iter()
-                .fold(Modifiers::default(), |acc, m| acc.union(m));
+            let modifiers = mods.iter().fold(Modifiers::default(), |acc, m| acc.union(m));
             action = action
                 .with_modifiers(&modifiers)
                 .ok_or_else(|| ConfigError::new("action cannot be modified", range.clone()))?
@@ -180,10 +170,7 @@ impl<'a> Lookup<'a> {
             .or_else(|| SINGLE_REGEX.captures(str.as_ref()))
             .ok_or_else(|| ConfigError::new("invalid button", range.clone()))?;
 
-        let action_str = captures
-            .name("action")
-            .expect("Missing action name")
-            .as_str();
+        let action_str = captures.name("action").expect("action name should exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
         let flags_str = captures.name("flags").unwrap().as_str();
         let (action, flags) =
@@ -191,20 +178,15 @@ impl<'a> Lookup<'a> {
 
         // If we've got an alt_action or a :rev flag, we're parsing an AB button
         if captures.name("alt_action").is_some() {
-            let alt_action_str = captures
-                .name("alt_action")
-                .expect("Missing alt action name")
-                .as_str();
+            let alt_action_str =
+                captures.name("alt_action").expect("alt action name should exist").as_str();
             let alt_args_str = captures.name("alt_args").map(|a| a.as_str());
             let alt_flags_str = captures.name("alt_flags").unwrap().as_str();
             let (alt_action, alt_flags) =
                 self.action_and_flags(alt_action_str, alt_args_str, alt_flags_str, range.clone())?;
 
             if !alt_flags.is_empty() {
-                return Err(ConfigError::new(
-                    "AB binds accept no other flags",
-                    range.clone(),
-                ));
+                return Err(ConfigError::new("AB binds accept no other flags", range.clone()));
             }
 
             return Ok(Bind::ButtonAB(action.into(), alt_action.into()).into());
@@ -237,20 +219,15 @@ impl<'a> Lookup<'a> {
             .or_else(|| SINGLE_REGEX.captures(str.get_ref()))
             .ok_or_else(|| ConfigError::new("invalid scroll", range.clone()))?;
 
-        let action_str = captures
-            .name("action")
-            .expect("Missing action name")
-            .as_str();
+        let action_str = captures.name("action").expect("action name should exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
         let flags_str = captures.name("flags").unwrap().as_str();
         let (action, flags) =
             self.action_and_flags(action_str, args_str, flags_str, range.clone())?;
 
         let (alt_action, alt_flags) = if captures.name("alt_action").is_some() {
-            let alt_action_str = captures
-                .name("alt_action")
-                .expect("Missing alt action name")
-                .as_str();
+            let alt_action_str =
+                captures.name("alt_action").expect("alt action name should exist").as_str();
             let alt_args_str = captures.name("alt_args").map(|a| a.as_str());
             let alt_flags_str = captures.name("alt_flags").unwrap().as_str();
             let (alt_action, alt_flags) =
@@ -273,12 +250,7 @@ impl<'a> Lookup<'a> {
             }
         }
 
-        Ok(Bind::Scroll {
-            fwd: action.into(),
-            bak: alt_action.into(),
-            rate: rate,
-        }
-        .into())
+        Ok(Bind::Scroll { fwd: action.into(), bak: alt_action.into(), rate: rate }.into())
     }
 
     fn scroll_bind_opt(&self, str: Spanned<String>) -> Option<Rc<Bind>> {
@@ -296,20 +268,14 @@ impl<'a> Lookup<'a> {
             .captures(str.as_ref())
             .ok_or_else(|| ConfigError::new("failed to match shortcut", range.clone()))?;
 
-        let action_str = captures
-            .name("action")
-            .expect("Missing action name")
-            .as_str();
+        let action_str = captures.name("action").expect("action name shuold exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
         let flags_str = captures.name("flags").unwrap().as_str();
         let (action, flags) =
             self.action_and_flags(action_str, args_str, flags_str, range.clone())?;
 
         if !flags.is_empty() {
-            return Err(ConfigError::new(
-                "shortcut binds accept no other flags",
-                range.clone(),
-            ));
+            return Err(ConfigError::new("shortcut binds accept no other flags", range.clone()));
         }
 
         Ok(action.into())
@@ -333,11 +299,7 @@ pub enum Bind {
     ButtonUp(Rc<Action>),
     ButtonRepeat(Rc<Action>),
     ButtonAB(Rc<Action>, Rc<Action>),
-    Scroll {
-        fwd: Rc<Action>,
-        bak: Rc<Action>,
-        rate: Rate,
-    },
+    Scroll { fwd: Rc<Action>, bak: Rc<Action>, rate: Rate },
 }
 
 impl Bind {
@@ -371,11 +333,7 @@ impl fmt::Display for Bind {
             Bind::ButtonUp(_a) => write!(f, "btnUp"),
             Bind::ButtonRepeat(_a) => write!(f, "btnRep"),
             Bind::ButtonAB(_a, _b) => write!(f, "btn A/B"),
-            Bind::Scroll {
-                fwd: _,
-                bak: _,
-                rate,
-            } => write!(f, "scroll at {:?}", rate),
+            Bind::Scroll { fwd: _, bak: _, rate } => write!(f, "scroll at {:?}", rate),
         }
     }
 }
@@ -540,6 +498,15 @@ pub struct Macro<A> {
     pub actions: Vec<A>,
 }
 
+#[derive(Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct MacroGroup<A> {
+    pub name: String,
+    #[serde(default)]
+    pub reverse: bool,
+    pub groups: Vec<Vec<A>>,
+}
+
 #[derive(Deserialize, Clone, Debug, Default, PartialEq)]
 pub enum MenuAnchor {
     TopLeft,
@@ -632,6 +599,7 @@ pub struct RawConfig<A, B> {
     pub layers: HashMap<String, Layer<B>>,
     pub shortcuts: HashMap<String, Shortcut<A>>,
     pub macros: HashMap<String, Macro<A>>,
+    pub macro_groups: HashMap<String, MacroGroup<A>>,
     pub menus: HashMap<String, Rc<Menu<A>>>,
     pub library: Option<ActionLibrary>,
 }
@@ -642,9 +610,7 @@ pub type Config = RawConfig<Rc<Action>, Rc<Bind>>;
 pub static MENU_LAYER_TOML: &'static str = include_str!("menu_layer.toml");
 
 pub fn generate_menu_layer(lookup: &Lookup) -> Layer<Rc<Bind>> {
-    toml::from_str::<Layer<Spanned<String>>>(MENU_LAYER_TOML)
-        .unwrap()
-        .actualize(lookup)
+    toml::from_str::<Layer<Spanned<String>>>(MENU_LAYER_TOML).unwrap().actualize(lookup)
 }
 
 impl Config {
@@ -659,9 +625,14 @@ impl Config {
             Action::PtrButton(_, modifiers) => "[ptr_button]",
             Action::PtrAxis(axis, _, modifiers) => "[ptr_axis]",
             Action::PtrAxisDiscrete(axis, _, _, modifiers) => "[ptr_axis_discrete]",
-            Action::Shortcut(name) => &self.shortcuts.get(name).expect("shortcut missing").name,
-            Action::Macro(name) => &self.macros.get(name).expect("macro missing").name,
-            Action::Menu(name) => &self.menus.get(name).expect("menu missing").name,
+            Action::Shortcut(name) => {
+                &self.shortcuts.get(name).expect("shortcut should exist").name
+            }
+            Action::Macro(name) => &self.macros.get(name).expect("macro should exist").name,
+            Action::MacroGroup(name) => {
+                &self.macro_groups.get(name).expect("macro group should exist").name
+            }
+            Action::Menu(name) => &self.menus.get(name).expect("menu should exist").name,
             Action::Layer(name) => name.as_ref().map_or(base, |v| v),
         }
     }
@@ -683,6 +654,11 @@ impl StringConfig {
             lookup.library().insert(key.clone(), action.into());
         }
 
+        for (key, _macro_group) in self.macro_groups.iter() {
+            let action = Action::MacroGroup(key.clone());
+            lookup.library().insert(key.clone(), action.into());
+        }
+
         for (key, _menu) in self.menus.iter() {
             let action = Action::Menu(key.clone());
             lookup.library().insert(key.clone(), action.into());
@@ -693,41 +669,47 @@ impl StringConfig {
             lookup.library().insert(key.clone(), action.into());
         }
 
-        let shortcuts = self
+        let shortcuts: HashMap<_, _> = self
             .shortcuts
             .into_iter()
             .map(|(key, c_shortcut)| {
-                let inner_action = lookup.shortcut_bind(c_shortcut.action)?;
-                Ok((
-                    key,
-                    Shortcut {
-                        name: c_shortcut.name,
-                        action: inner_action,
-                    },
-                ))
+                let action = lookup.shortcut_bind(c_shortcut.action)?;
+                Ok((key, Shortcut { name: c_shortcut.name, action }))
             })
-            .collect::<Result<HashMap<_, _>, _>>()?;
+            .collect::<Result<_, _>>()?;
 
-        let macros = self
+        let macros: HashMap<_, _> = self
             .macros
             .into_iter()
             .map(|(key, c_macro)| {
-                let inner_actions: Vec<_> = c_macro
+                let actions = c_macro
                     .actions
                     .into_iter()
                     .map(|a| lookup.shortcut_bind(a))
                     .collect::<Result<Vec<_>, _>>()?;
+                Ok((key, Macro { name: c_macro.name, actions }))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let macro_groups: HashMap<_, _> = self
+            .macro_groups
+            .into_iter()
+            .map(|(key, c_macro_group)| {
+                let groups = c_macro_group
+                    .groups
+                    .into_iter()
+                    .map(|v| {
+                        v.into_iter().map(|a| lookup.shortcut_bind(a)).collect::<Result<_, _>>()
+                    })
+                    .collect::<Result<_, _>>()?;
                 Ok((
                     key,
-                    Macro {
-                        name: c_macro.name,
-                        actions: inner_actions,
-                    },
+                    MacroGroup { name: c_macro_group.name, reverse: c_macro_group.reverse, groups },
                 ))
             })
-            .collect::<Result<HashMap<_, _>, _>>()?;
+            .collect::<Result<_, _>>()?;
 
-        let menus = self
+        let menus: HashMap<_, _> = self
             .menus
             .into_iter()
             .map(|(key, c_menu)| {
@@ -736,20 +718,17 @@ impl StringConfig {
                     .clone()
                     .into_iter()
                     .map(|a| lookup.shortcut_bind(a))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok((
-                    key,
-                    Menu {
-                        name: c_menu.name.clone(),
-                        message: c_menu.message.clone(),
-                        anchor: c_menu.anchor.clone(),
-                        entries: entries,
-                        select: c_menu.select,
-                    }
-                    .into(),
-                ))
+                    .collect::<Result<_, _>>()?;
+                let menu = Menu {
+                    name: c_menu.name.clone(),
+                    message: c_menu.message.clone(),
+                    anchor: c_menu.anchor.clone(),
+                    entries,
+                    select: c_menu.select.clone(),
+                };
+                Ok((key, menu.into()))
             })
-            .collect::<Result<HashMap<_, _>, _>>()?;
+            .collect::<Result<_, _>>()?;
 
         // everything after this point has access to all of the config's actions
 
@@ -766,10 +745,7 @@ impl StringConfig {
             })
             .collect::<HashMap<_, _>>();
 
-        layers.extend(HashMap::from([(
-            "menu".to_string(),
-            generate_menu_layer(&lookup),
-        )]));
+        layers.extend(HashMap::from([("menu".to_string(), generate_menu_layer(&lookup))]));
 
         Ok(Config {
             name: self.name,
@@ -777,6 +753,7 @@ impl StringConfig {
             layers,
             shortcuts,
             macros,
+            macro_groups,
             menus,
             library: Some(library),
         })
@@ -795,7 +772,7 @@ where
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(field_identifier, rename_all = "lowercase")]
+        #[serde(field_identifier, rename_all = "snake_case")]
         enum Field {
             Name,
             Prime,
@@ -806,6 +783,7 @@ where
             Layer,
             Shortcut,
             Macro,
+            MacroGroup,
             Menu,
         }
 
@@ -838,6 +816,7 @@ where
                 let mut layers = None;
                 let mut shortcuts = None;
                 let mut macros = None;
+                let mut macro_groups = None;
                 let mut menus = None;
                 while let Some(key) = map.next_key()? {
                     match key {
@@ -895,6 +874,12 @@ where
                             }
                             macros = Some(map.next_value()?);
                         }
+                        Field::MacroGroup => {
+                            if macro_groups.is_some() {
+                                return Err(de::Error::duplicate_field("macro_group"));
+                            }
+                            macro_groups = Some(map.next_value()?);
+                        }
                         Field::Menu => {
                             if menus.is_some() {
                                 return Err(de::Error::duplicate_field("menu"));
@@ -911,40 +896,23 @@ where
                 let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
                 Ok(RawConfig {
                     name: name,
-                    base: Layer {
-                        prime,
-                        kit,
-                        knob,
-                        scroll,
-                        dial,
-                    },
+                    base: Layer { prime, kit, knob, scroll, dial },
                     layers: layers.unwrap_or_else(|| HashMap::new()),
                     shortcuts: shortcuts.unwrap_or_else(|| HashMap::new()),
                     macros: macros.unwrap_or_else(|| HashMap::new()),
+                    macro_groups: macro_groups.unwrap_or_else(|| HashMap::new()),
                     menus: menus.unwrap_or_else(|| HashMap::new()),
                     library: None,
                 })
             }
         }
 
-        const FIELDS: &[&str] = &[
-            "name",
-            "prime",
-            "kit",
-            "knob",
-            "scroll",
-            "dial",
-            "layer",
-            "shortcuts",
-            "macro",
-        ];
+        const FIELDS: &[&str] =
+            &["name", "prime", "kit", "knob", "scroll", "dial", "layer", "shortcuts", "macro"];
         deserializer.deserialize_struct(
             "RawConfig",
             FIELDS,
-            RawConfigVisitor {
-                a: PhantomData,
-                b: PhantomData,
-            },
+            RawConfigVisitor { a: PhantomData, b: PhantomData },
         )
     }
 }
@@ -969,9 +937,9 @@ impl ConfigManager {
 
     pub fn load_config(&mut self, path: PathBuf) -> String {
         let library = ActionLibrary::new(Some(self.default_library.clone()));
-        let str = fs::read_to_string(path).expect("Config is not readable");
+        let str = fs::read_to_string(path).expect("config should be readable");
         let config = toml::from_str::<StringConfig>(&str)
-            .expect("Unable to load config")
+            .expect("config should load")
             .actualize(library)
             .map_err(|e| e.with_exact_loc(&str))
             .unwrap();
@@ -985,18 +953,12 @@ impl ConfigManager {
     }
 
     pub fn get_config(&self, name: &str) -> Option<Rc<Config>> {
-        self.configs
-            .iter()
-            .find(|c| c.name.eq(name))
-            .map(|c| c.clone())
+        self.configs.iter().find(|c| c.name.eq(name)).map(|c| c.clone())
     }
 
     fn load_default_config(library: Rc<ActionLibrary>) -> Config {
         let library = ActionLibrary::new(Some(library));
-        toml::from_str::<StringConfig>(DEFAULT_CONFIG_TOML)
-            .unwrap()
-            .actualize(library)
-            .unwrap()
+        toml::from_str::<StringConfig>(DEFAULT_CONFIG_TOML).unwrap().actualize(library).unwrap()
     }
 }
 
@@ -1031,9 +993,7 @@ mod tests {
 
     #[test]
     fn regexes_return_captures() {
-        let button_match = SINGLE_REGEX
-            .captures(BUTTON_BIND_MAX)
-            .expect("Match failed");
+        let button_match = SINGLE_REGEX.captures(BUTTON_BIND_MAX).expect("match should succeed");
         assert_eq!(button_match.name("action").unwrap().as_str(), "a_b_1");
 
         assert!(button_match.name("args").is_some());
@@ -1046,17 +1006,14 @@ mod tests {
         assert_eq!(button_args_match.get(2).unwrap().as_str(), "arg_3");
 
         assert!(button_match.name("flags").is_some());
-        let button_flags_match = FLAG_REGEX
-            .find_iter(button_match.name("flags").unwrap().as_str())
-            .collect::<Vec<_>>();
+        let button_flags_match =
+            FLAG_REGEX.find_iter(button_match.name("flags").unwrap().as_str()).collect::<Vec<_>>();
         assert_eq!(button_flags_match.len(), 3);
         assert_eq!(button_flags_match.get(0).unwrap().as_str(), ":flag_1");
         assert_eq!(button_flags_match.get(1).unwrap().as_str(), ":flag_2");
         assert_eq!(button_flags_match.get(2).unwrap().as_str(), ":flag_3");
 
-        let scroll_match = DOUBLE_REGEX
-            .captures(SCROLL_BIND_MAX)
-            .expect("Match failed");
+        let scroll_match = DOUBLE_REGEX.captures(SCROLL_BIND_MAX).expect("match should succeed");
 
         assert!(scroll_match.name("action").unwrap().as_str() == "a_b_1");
 
@@ -1119,10 +1076,7 @@ mod tests {
             "b".to_string(),
             Action::Key(KeyCode::KEY_X, Some(Modifiers::default())).into(),
         );
-        library.insert(
-            "t".to_string(),
-            Action::PtrAxis(Axis::VerticalScroll, 20.0, None).into(),
-        );
+        library.insert("t".to_string(), Action::PtrAxis(Axis::VerticalScroll, 20.0, None).into());
         library.insert("a".to_string(), Action::None.into());
         library.insert("b".to_string(), Action::None.into());
         library.insert("c".to_string(), Action::None.into());

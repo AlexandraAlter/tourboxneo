@@ -50,16 +50,13 @@ impl Modifiers {
         SHORT_MODIFIERS.get(str).map(|m| {
             MODIFIERS
                 .get(m)
-                .expect("Short modifier should correspond to a long modifier")
+                .expect("short modifier should correspond to a long modifier")
                 .to_owned()
         })
     }
 
     pub fn lookup_mod(str: &str) -> Option<Modifiers> {
-        MODIFIERS
-            .get(str)
-            .map(|t| t.to_owned())
-            .or_else(|| Self::lookup_short_mod(str))
+        MODIFIERS.get(str).map(|t| t.to_owned()).or_else(|| Self::lookup_short_mod(str))
     }
 }
 
@@ -114,6 +111,7 @@ pub enum Action {
     PtrAxisDiscrete(Axis, f64, i32, Option<Modifiers>),
     Shortcut(String),
     Macro(String),
+    MacroGroup(String),
     Menu(String),
     Layer(Option<String>),
 }
@@ -135,9 +133,7 @@ impl Action {
 
     pub fn with_modifiers(&self, modifiers: &Modifiers) -> Option<Action> {
         let modmap = move |o: &Option<Modifiers>| {
-            o.clone()
-                .map(|m| m.union(modifiers))
-                .or(Some(modifiers.clone()))
+            o.clone().map(|m| m.union(modifiers)).or(Some(modifiers.clone()))
         };
         match self {
             Action::Mod(mods) => Some(Action::Mod(modmap(&Some(mods.clone())).unwrap())),
@@ -178,6 +174,7 @@ impl fmt::Display for Action {
             Action::PtrAxisDiscrete(axis, v, d, mods) => write!(f, "unimpl"),
             Action::Shortcut(name) => write!(f, "shortcut {}", name),
             Action::Macro(name) => write!(f, "macro {}", name),
+            Action::MacroGroup(name) => write!(f, "macro group {}", name),
             Action::Menu(name) => write!(f, "menu {}", name),
             Action::Layer(name) => {
                 let name_or_base = name.as_ref().map(|s| s.as_ref()).unwrap_or_else(|| "base");
@@ -211,11 +208,7 @@ pub struct ActionLibrary {
 
 impl ActionLibrary {
     pub fn new(parent: Option<Rc<ActionLibrary>>) -> ActionLibrary {
-        ActionLibrary {
-            parent,
-            actions: HashMap::new(),
-            action_fns: HashMap::new(),
-        }
+        ActionLibrary { parent, actions: HashMap::new(), action_fns: HashMap::new() }
     }
 
     pub fn get(&self, key: &str, args: &Option<Vec<String>>) -> Option<Rc<Action>> {
@@ -244,11 +237,8 @@ impl ActionLibrary {
 
 impl Default for ActionLibrary {
     fn default() -> Self {
-        let mut library = Self {
-            parent: None,
-            actions: HashMap::new(),
-            action_fns: HashMap::new(),
-        };
+        let mut library =
+            Self { parent: None, actions: HashMap::new(), action_fns: HashMap::new() };
 
         library.insert("none".to_string(), Action::None.into());
 
@@ -263,10 +253,7 @@ impl Default for ActionLibrary {
         }
 
         for (key, value) in BUTTONS.iter() {
-            library.insert(
-                key.to_string(),
-                Action::PtrButton(value.0 as u32, None).into(),
-            );
+            library.insert(key.to_string(), Action::PtrButton(value.0 as u32, None).into());
         }
 
         library.insert_fn(
@@ -296,22 +283,14 @@ impl Default for ActionLibrary {
         library.insert_fn(
             "ptr_wheel".to_string(),
             ActionFn(Rc::new(|args| {
-                Action::PtrAxis(
-                    Axis::VerticalScroll,
-                    args.get(0).unwrap().parse().unwrap(),
-                    None,
-                )
+                Action::PtrAxis(Axis::VerticalScroll, args.get(0).unwrap().parse().unwrap(), None)
             })),
         );
 
         library.insert_fn(
             "ptr_hwheel".to_string(),
             ActionFn(Rc::new(|args| {
-                Action::PtrAxis(
-                    Axis::HorizontalScroll,
-                    args.get(0).unwrap().parse().unwrap(),
-                    None,
-                )
+                Action::PtrAxis(Axis::HorizontalScroll, args.get(0).unwrap().parse().unwrap(), None)
             })),
         );
 
@@ -959,18 +938,12 @@ mod tests {
     fn modifiers_can_lookup() {
         assert_eq!(
             Modifiers::lookup_mod("S"),
-            Some(Modifiers(
-                ModifierFlags::SHIFT,
-                vec![KeyCode::KEY_LEFTSHIFT]
-            ))
+            Some(Modifiers(ModifierFlags::SHIFT, vec![KeyCode::KEY_LEFTSHIFT]))
         );
         assert_eq!(Modifiers::lookup_mod("Q"), None);
         assert_eq!(
             Modifiers::lookup_mod("shift"),
-            Some(Modifiers(
-                ModifierFlags::SHIFT,
-                vec![KeyCode::KEY_LEFTSHIFT]
-            ))
+            Some(Modifiers(ModifierFlags::SHIFT, vec![KeyCode::KEY_LEFTSHIFT]))
         );
         assert_eq!(
             Modifiers::lookup_mod("rightmeta"),

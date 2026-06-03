@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::iter;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -17,22 +16,18 @@ use crate::timer::{ClockId, TimerFd};
 
 const SERIAL: Token = Token(0);
 const REPEAT: Token = Token(1);
-const FUZZEL_SENDER: Token = Token(2);
-const FUZZEL_RECEIVER: Token = Token(3);
+const MENU_SENDER: Token = Token(2);
+const MENU_RECEIVER: Token = Token(3);
 
 pub struct Tickers {
-    knob: u8,
-    scroll: u8,
-    dial: u8,
+    knob: usize,
+    scroll: usize,
+    dial: usize,
 }
 
 impl Tickers {
     pub fn new() -> Tickers {
-        Tickers {
-            knob: 0,
-            scroll: 0,
-            dial: 0,
-        }
+        Tickers { knob: 0, scroll: 0, dial: 0 }
     }
 }
 
@@ -93,13 +88,15 @@ pub struct Engine {
     /// Held binds, for repeating events
     repeating_codes: Vec<Code>,
     /// Tickers for each dial
-    ticks: Tickers,
+    dial_ticks: Tickers,
+    /// Tickers for each macro group
+    macro_group_ticks: HashMap<String, usize>,
 }
 
 impl Engine {
     pub fn new(device_path: Option<PathBuf>) -> Engine {
         let serial = SerialEventStream::new(serial::open(device_path));
-        let timer = TimerFd::new(ClockId::Monotonic).expect("failed to build timer");
+        let timer = TimerFd::new(ClockId::Monotonic).expect("timer should build");
 
         let output = OutputDriver::new();
 
@@ -116,7 +113,8 @@ impl Engine {
             layer: None,
             held_actions: HashMap::new(),
             repeating_codes: Vec::new(),
-            ticks: Tickers::new(),
+            dial_ticks: Tickers::new(),
+            macro_group_ticks: HashMap::new(),
         }
     }
 
@@ -125,21 +123,14 @@ impl Engine {
     }
 
     pub fn set_config(&mut self, name: &str) {
-        let config = self
-            .config_manager
-            .get_config(name)
-            .expect("Config name should be valid");
+        let config = self.config_manager.get_config(name).expect("config name should be valid");
         self.config = config;
     }
 
     /// Given two codes, returns which one is not currently being held
     /// Used to calculate fallbacks to more complicated keycodes
     fn missing_code(&self, input_a: Code, input_b: Code) -> Code {
-        if self.held_actions.contains_key(&input_a) {
-            input_b
-        } else {
-            input_a
-        }
+        if self.held_actions.contains_key(&input_a) { input_b } else { input_a }
     }
 
     fn code_to_scroll(&self, input: Code) -> Option<Code> {
@@ -258,18 +249,10 @@ impl Engine {
 
             Code::Tour => layer.kit_ref().and_then(|v| v.tour.clone()),
 
-            Code::Up => layer
-                .kit_ref()
-                .and_then(|v| v.dpad_ref().and_then(|v| v.up.clone())),
-            Code::Down => layer
-                .kit_ref()
-                .and_then(|v| v.dpad_ref().and_then(|v| v.down.clone())),
-            Code::Left => layer
-                .kit_ref()
-                .and_then(|v| v.dpad_ref().and_then(|v| v.left.clone())),
-            Code::Right => layer
-                .kit_ref()
-                .and_then(|v| v.dpad_ref().and_then(|v| v.right.clone())),
+            Code::Up => layer.kit_ref().and_then(|v| v.dpad_ref().and_then(|v| v.up.clone())),
+            Code::Down => layer.kit_ref().and_then(|v| v.dpad_ref().and_then(|v| v.down.clone())),
+            Code::Left => layer.kit_ref().and_then(|v| v.dpad_ref().and_then(|v| v.left.clone())),
+            Code::Right => layer.kit_ref().and_then(|v| v.dpad_ref().and_then(|v| v.right.clone())),
 
             Code::SideUp => layer
                 .kit_ref()
@@ -367,7 +350,7 @@ impl Engine {
             Code::DialButton => layer.dial_ref().and_then(|v| v.press.clone()),
             Code::Dial => layer.dial_ref().and_then(|v| v.turn.clone()),
 
-            _ => panic!("Impossible code received"),
+            _ => panic!("impossible code received"),
         }
     }
 
@@ -377,7 +360,7 @@ impl Engine {
     fn code_to_bind(&self, input: Code) -> Option<Rc<Bind>> {
         match self.layer.as_ref() {
             Some(l) => {
-                let layer = &self.config.layers.get(l).expect("layer went missing");
+                let layer = &self.config.layers.get(l).expect("layer should exist");
                 self.code_to_bind_inner(layer, input)
                     .or_else(|| self.code_to_bind_inner(&self.config.base, input))
             }
@@ -426,8 +409,7 @@ impl Engine {
             }
             Action::PtrMotionAbs(x, y, x_extent, y_extent, mods) => {
                 mods.as_ref().map(|m| self.mods_down(&m));
-                self.output
-                    .ptr_motion_absolute(*x, *y, *x_extent, *y_extent);
+                self.output.ptr_motion_absolute(*x, *y, *x_extent, *y_extent);
                 self.output.ptr_frame();
             }
             Action::PtrButton(button, mods) => {
@@ -447,23 +429,38 @@ impl Engine {
                 self.output.ptr_frame();
             }
             Action::Shortcut(name) => {
-                let shortcut = self.config.shortcuts.get(name).expect("macro missing");
+                let shortcut = self.config.shortcuts.get(name).expect("macro should exist");
                 msg.append_consume(self.action_down(code, shortcut.action.clone()));
             }
             Action::Macro(name) => {
-                let r#macro = self.config.macros.get(name).expect("macro missing");
-                let macro_actions = r#macro
-                    .actions
-                    .iter()
-                    .map(|a| a.clone())
-                    .collect::<Vec<_>>();
+                let r#macro = self.config.macros.get(name).expect("macro should exist");
+                let macro_actions = r#macro.actions.to_owned();
                 for a in macro_actions {
                     self.action_down(Code::Macro, a.clone());
                     self.action_up(Code::Macro, a.clone());
                 }
             }
+            Action::MacroGroup(name) => {
+                let r#macro = self.config.macro_groups.get(name).expect("macro group should exist");
+                let ticker_max = r#macro.groups.len();
+                let ticker = self
+                    .macro_group_ticks
+                    .entry(name.clone())
+                    .and_modify(|a| *a = (*a + 1) % ticker_max)
+                    .or_insert(0);
+                let group = if !r#macro.reverse {
+                    r#macro.groups.get(*ticker)
+                } else {
+                    r#macro.groups.get(ticker_max - *ticker - 1)
+                };
+                let actions = group.expect("macro group index should be in of bounds").to_owned();
+                for a in actions {
+                    self.action_down(Code::Macro, a.clone());
+                    self.action_up(Code::Macro, a.clone());
+                }
+            }
             Action::Menu(name) => {
-                let menu = self.config.menus.get(name).expect("menu missing");
+                let menu = self.config.menus.get(name).expect("menu should exist");
                 msg.add_menu(FuzzelMenu::new(menu.clone(), self.layer.clone()));
                 self.layer = Some("menu".to_string());
             }
@@ -517,25 +514,19 @@ impl Engine {
                 mods.as_ref().map(|m| self.mods_up(&m));
             }
             Action::Shortcut(name) => {
-                let shortcut = self.config.shortcuts.get(name).expect("macro missing");
+                let shortcut = self.config.shortcuts.get(name).expect("macro should exist");
                 self.action_up(code, shortcut.action.clone())
             }
             Action::Macro(_) => {}
+            Action::MacroGroup(_) => {}
             Action::Menu(_) => {}
             Action::Layer(_) => {}
         };
     }
 
-    fn handle_input(&mut self, input: Input) -> EngineMsg {
+    fn execute_bind(&mut self, input: &Input, bind: &Bind) -> EngineMsg {
         let mut msg = EngineMsg::new();
-        let bind = self.code_to_bind(input.code);
-        if bind.is_none() {
-            warn!("no binding for code");
-            return msg;
-        }
-        let bind = bind.unwrap();
-        info!("{} -> {} : {}", input, bind, bind.get_action(input.reverse));
-        match &*bind {
+        match bind {
             Bind::Button(action) => {
                 if !input.release {
                     msg.append_consume(self.action_down(input.code, action.clone()));
@@ -572,9 +563,9 @@ impl Engine {
             Bind::Scroll { fwd, bak, rate } => {
                 let scroll_code = self.code_to_scroll(input.code);
                 let counter = match scroll_code {
-                    Some(Code::Knob) => self.ticks.knob.wrapping_add(1),
-                    Some(Code::Scroll) => self.ticks.scroll.wrapping_add(1),
-                    Some(Code::Dial) => self.ticks.dial.wrapping_add(1),
+                    Some(Code::Knob) => self.dial_ticks.knob.wrapping_add(1),
+                    Some(Code::Scroll) => self.dial_ticks.scroll.wrapping_add(1),
+                    Some(Code::Dial) => self.dial_ticks.dial.wrapping_add(1),
                     _ => panic!("Scrolled something that should not scroll"),
                 };
                 let modulo = match rate {
@@ -594,37 +585,43 @@ impl Engine {
         msg
     }
 
-    pub fn register_fuzzel_pipe(&mut self, poll: &mut Poll, mut menu: FuzzelMenu) {
-        info!("fuzzel cmd");
+    pub fn register_menu_pipe(&mut self, poll: &mut Poll, mut menu: FuzzelMenu) {
         if let Some(_) = &self.menu {
-            warn!("killing duplicate menu");
-            self.deregister_fuzzel_pipe(poll);
+            warn!("menu duplication, killing old menu");
+            self.deregister_menu_pipe(poll);
         };
         poll.registry()
-            .register(menu.receiver(), FUZZEL_RECEIVER, Interest::READABLE)
-            .unwrap();
+            .register(menu.receiver(), MENU_RECEIVER, Interest::READABLE)
+            .expect("MIO register should succeed for menu stdin");
         poll.registry()
-            .register(menu.sender(), FUZZEL_SENDER, Interest::WRITABLE)
-            .unwrap();
+            .register(menu.sender(), MENU_SENDER, Interest::WRITABLE)
+            .expect("MIO register should succeed for menu stdin");
         self.menu = Some(menu);
     }
 
-    pub fn deregister_fuzzel_pipe(&mut self, poll: &mut Poll) {
+    pub fn deregister_menu_pipe(&mut self, poll: &mut Poll) {
+        let menu = self.menu.as_mut().expect("menu should exist");
         poll.registry()
-            .deregister(self.menu.as_mut().unwrap().sender())
-            .unwrap();
+            .deregister(menu.sender())
+            .expect("MIO deregister should succeed for menu stdin");
         poll.registry()
-            .deregister(self.menu.as_mut().unwrap().receiver())
-            .unwrap();
+            .deregister(menu.receiver())
+            .expect("MIO deregister should succeed for menu stdout");
         self.menu = None;
     }
 
+    // handle a serial input from the device
     pub fn handle_serial(&mut self) -> EngineMsg {
         let mut msg = EngineMsg::new();
         loop {
             match self.serial.next() {
                 Some(Ok(input)) => {
-                    msg.append_consume(self.handle_input(input));
+                    if let Some(bind) = self.code_to_bind(input.code) {
+                        info!("{} -> {} : {}", input, bind, bind.get_action(input.reverse));
+                        msg.append_consume(self.execute_bind(&input, bind.as_ref()));
+                    } else {
+                        warn!("no binding for code");
+                    }
                 }
                 Some(Err(ref err)) if would_block(err) => break,
                 Some(Err(err)) => panic!("{}", err),
@@ -634,75 +631,84 @@ impl Engine {
         msg
     }
 
+    // handle a timer-based repetition
     pub fn handle_repeat(&mut self) {
-        info!("Timer tick");
+        info!("timer tick");
         self.timer.set_timeout(&Duration::from_millis(10)).unwrap();
         let timeout_num = self.timer.read().unwrap();
         assert!(timeout_num == 1);
     }
 
-    pub fn handle_fuzzel(&mut self) {
-        // let action = match &mut self.fuzzel {
-        //     Some(rec) => read_fuzzel_result(rec),
-        //     None => panic!("fuzzel callback but no receiver was present"),
-        // };
-        let action = "?";
-        warn!("fuzzel reports: {:?}", action);
+    // handle the return of an external menu
+    pub fn handle_menu(&mut self) -> EngineMsg {
+        let mut msg = EngineMsg::new();
+        let menu = self.menu.as_mut().expect("menu should exist");
+        match menu.read_action().expect("menu should provide an action") {
+            Some(action) => {
+                info!("{} -> {}", Code::Menu, action);
+                msg.append_consume(self.action_down(Code::Menu, action.clone()));
+                self.action_up(Code::Menu, action.clone());
+            }
+            None => info!("menu aborted"),
+        }
+        msg
+    }
+
+    // handle a message passed from deeper in the event loop
+    pub fn handle_engine_msg(&mut self, msg: EngineMsg, poll: &mut Poll) {
+        for cmd in msg.get_cmds().into_iter() {
+            match cmd {
+                EngineCmd::Menu(menu) => {
+                    self.register_menu_pipe(poll, menu);
+                }
+            }
+        }
     }
 
     pub fn run(&mut self) {
-        let mut poll = Poll::new().expect("MIO poll failed to start");
+        let mut poll = Poll::new().expect("MIO poll should start");
         poll.registry()
             .register(self.get_serial(), SERIAL, Interest::READABLE)
-            .expect("MIO register failed");
+            .expect("MIO serial should register");
         poll.registry()
             .register(self.get_timer(), REPEAT, Interest::READABLE)
-            .unwrap();
+            .expect("MIO timer should register");
 
         let mut events = Events::with_capacity(128);
 
         loop {
             poll.poll(&mut events, Some(Duration::from_millis(100)))
-                .unwrap();
+                .expect("MIO poll should succeed");
 
             for event in events.iter() {
                 match event.token() {
+                    // serial message, run action
                     SERIAL => {
                         let msg = self.handle_serial();
-                        for cmd in msg.get_cmds().into_iter() {
-                            match cmd {
-                                EngineCmd::Menu(menu) => {
-                                    self.register_fuzzel_pipe(&mut poll, menu);
-                                }
-                            }
-                        }
+                        self.handle_engine_msg(msg, &mut poll);
                     }
+                    // timer message, re-run action
                     REPEAT => self.handle_repeat(),
-                    FUZZEL_SENDER if event.is_write_closed() => {
-                        info!("fuzzel sender closed");
-                        let menu = self.menu.as_mut().expect("menu destroyed before recv");
+                    // fuzzel sender closed, clean up
+                    MENU_SENDER if event.is_write_closed() => {
+                        let menu = self.menu.as_mut().expect("menu should exist");
                         self.layer = menu.last_layer().clone();
-                        self.deregister_fuzzel_pipe(&mut poll);
+                        self.deregister_menu_pipe(&mut poll);
                     }
-                    FUZZEL_SENDER => {
-                        info!("fuzzel sender hit");
-                        let menu = self.menu.as_mut().expect("menu destroyed before send");
+                    // fuzzel sender established, send stdin
+                    MENU_SENDER => {
+                        let menu = self.menu.as_mut().expect("menu should exist");
                         let stdin = menu.get_stdin(&self.config);
                         menu.sender()
                             .write_all(stdin.as_bytes())
-                            .expect("failed to write menu to fuzzel");
+                            .expect("menu sender should write options");
                     }
-                    FUZZEL_RECEIVER if event.is_read_closed() => {
-                        info!("fuzzel receiver closed");
-                    }
-                    FUZZEL_RECEIVER => {
-                        info!("fuzzel receiver event");
-                        let menu = self.menu.as_mut().expect("menu destroyed before recv");
-                        let mut str = String::new();
-                        menu.receiver()
-                            .read_to_string(&mut str)
-                            .expect("failed to read result from fuzzel");
-                        println!("{}", str);
+                    // fuzzel receiver closed, but we clean up elsewhere
+                    MENU_RECEIVER if event.is_read_closed() => {}
+                    // fuzzel receiver message, run action
+                    MENU_RECEIVER => {
+                        let msg = self.handle_menu();
+                        self.handle_engine_msg(msg, &mut poll);
                     }
                     _ => {}
                 }

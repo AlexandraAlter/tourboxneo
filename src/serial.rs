@@ -11,7 +11,7 @@ use mio_serial::{self, SerialPortInfo, SerialPortType, SerialStream};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 pub fn find_device() -> Option<SerialPortInfo> {
-    let ports = mio_serial::available_ports().expect("No ports found!");
+    let ports = mio_serial::available_ports().expect("should find ports");
     ports.into_iter().find(|p| match &p.port_type {
         SerialPortType::UsbPort(usb_port_info)
             if usb_port_info.vid == 0x2e3c && usb_port_info.pid == 0x5740 =>
@@ -26,7 +26,7 @@ pub fn find_device() -> Option<SerialPortInfo> {
 pub fn open(path: Option<PathBuf>) -> SerialStream {
     let device = match path {
         Some(p) => p.to_string_lossy().to_string(),
-        None => find_device().expect("No device found").port_name,
+        None => find_device().expect("should find device").port_name,
     };
     let builder = mio_serial::new(device, 115_200).timeout(Duration::from_millis(10));
     SerialStream::open(&builder).unwrap()
@@ -95,9 +95,9 @@ pub enum Code {
     DialButton = 0x38,
     Dial = 0x0f,
 
-    /// Dummy value used in `Engine::held_actions` for ongoing macro invocations
+    /// Dummy value used in `Engine` for ongoing macro invocations
     Macro = 0xfe,
-    /// Dummy value used in `Engine::` for ongoing menu invocations
+    /// Dummy value used in `Engine` for ongoing menu invocations
     Menu = 0xff,
 }
 
@@ -130,18 +130,14 @@ impl From<u8> for Input {
     fn from(value: u8) -> Self {
         let release = value & RELEASE != 0;
         let mut reverse = value & REVERSE != 0;
-        let code = Code::try_from(value & CODE_MASK).expect("Invalid code");
+        let code = Code::try_from(value & CODE_MASK).expect("code should be valid");
 
         // A horrific workaround for the fact that one scroll input comes through reversed
         if code == Code::Knob {
             reverse = !reverse;
         }
 
-        Input {
-            code,
-            reverse,
-            release,
-        }
+        Input { code, reverse, release }
     }
 }
 
