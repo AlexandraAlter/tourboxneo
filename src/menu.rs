@@ -12,14 +12,14 @@ use crate::{
 };
 
 pub struct FuzzelMenu {
-    menu: Rc<Menu<Rc<Action>>>,
+    menu: Rc<Menu<String, Rc<Action>>>,
     sender: Sender,
     receiver: Receiver,
     last_layer: Option<String>,
 }
 
 impl FuzzelMenu {
-    pub fn new(menu: Rc<Menu<Rc<Action>>>, last_layer: Option<String>) -> Self {
+    pub fn new(menu: Rc<Menu<String, Rc<Action>>>, last_layer: Option<String>) -> Self {
         let mut child = Command::new("fuzzel")
             .arg("--dmenu")
             .arg("--hide-prompt")

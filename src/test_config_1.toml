@@ -56,7 +56,7 @@ short_turn = "t"
 press = "b"
 turn = "t"
 
-[layer.test.prime]
+[layers.test.prime]
 side = "b"
 side_x2 = "b"
 top = "b"
@@ -72,20 +72,22 @@ top_tall = "b"
 top_short = "b"
 tall_short = "b"
 
-[shortcut]
+[layers.menu]
+
+[shortcuts]
 a = { name = "A", action = "a" }
 b = "b"
 c = "b"
 
-[macro.macro1]
+[macros.macro1]
 name = "Test Macro 1"
 actions = ["a", "b", "c"]
 
-[macro.macro2]
+[macros.macro2]
 name = "Test Macro 2"
 actions = ["a", "b", "c"]
 
-[macro_group.macro_group1]
+[macro_groups.macro_group1]
 name = "Test Macro Group 1"
 groups = [
   ["a"],
@@ -93,7 +95,7 @@ groups = [
   ["c"],
 ]
 
-[macro_group.macro_group2]
+[macro_groups.macro_group2]
 name = "Test Macro Group 2"
 reverse = true
 groups = [

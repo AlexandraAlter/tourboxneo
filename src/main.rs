@@ -1,7 +1,6 @@
 mod actions;
 mod config;
 mod engine;
-mod error;
 mod menu;
 mod output;
 mod serial;
@@ -48,11 +47,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    stderrlog::new()
-        .verbosity(args.verbose as usize)
-        .quiet(args.quiet)
-        .init()
-        .unwrap();
+    stderrlog::new().verbosity(args.verbose as usize).quiet(args.quiet).init().unwrap();
 
     info!("Startup complete at verbosity {}", args.verbose);
 

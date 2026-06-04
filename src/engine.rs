@@ -154,7 +154,11 @@ impl Engine {
     }
 
     /// Given a code without a matching bind in the current config, return an appropriate fallback bind
-    fn code_to_fallback_bind(&self, layer: &Layer<Rc<Bind>>, input: Code) -> Option<Rc<Bind>> {
+    fn code_to_fallback_bind<N>(
+        &self,
+        layer: &Layer<N, Rc<Bind>>,
+        input: Code,
+    ) -> Option<Rc<Bind>> {
         let code = match input {
             Code::TallDbl => Code::Tall,
             Code::SideDbl => Code::Side,
@@ -199,7 +203,7 @@ impl Engine {
         self.code_to_bind_inner(layer, code)
     }
 
-    fn code_to_bind_inner(&self, layer: &Layer<Rc<Bind>>, input: Code) -> Option<Rc<Bind>> {
+    fn code_to_bind_inner<N>(&self, layer: &Layer<N, Rc<Bind>>, input: Code) -> Option<Rc<Bind>> {
         match input {
             Code::Tall => layer.prime_ref().and_then(|v| v.tall.clone()),
             Code::Side => layer.prime_ref().and_then(|v| v.side.clone()),
