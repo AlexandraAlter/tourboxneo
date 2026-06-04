@@ -72,15 +72,32 @@ top_tall = "b"
 top_short = "b"
 tall_short = "b"
 
-[shortcuts]
-a = "b"
+[shortcut]
+a = { name = "A", action = "a" }
 b = "b"
 c = "b"
 
-[[macro]]
-name = "foo"
+[macro.macro1]
+name = "Test Macro 1"
 actions = ["a", "b", "c"]
 
-[[macro]]
-name = "foo"
+[macro.macro2]
+name = "Test Macro 2"
 actions = ["a", "b", "c"]
+
+[macro_group.macro_group1]
+name = "Test Macro Group 1"
+groups = [
+  ["a"],
+  ["b"],
+  ["c"],
+]
+
+[macro_group.macro_group2]
+name = "Test Macro Group 2"
+reverse = true
+groups = [
+  ["a"],
+  ["b"],
+  ["c"],
+]

@@ -1,4 +1,6 @@
-use std::{collections::HashMap, fmt, fs, marker::PhantomData, ops::Range, path::PathBuf, rc::Rc};
+use std::{
+    collections::HashMap, fmt, fs, marker::PhantomData, path::PathBuf, rc::Rc, str::FromStr,
+};
 
 use log::error;
 
@@ -8,7 +10,6 @@ use serde::{
     Deserialize,
     de::{self, Visitor},
 };
-use toml::Spanned;
 
 use crate::{
     actions::{Action, ActionLibrary, Modifiers},
@@ -76,15 +77,10 @@ enum Flag {
 pub struct Lookup<'a>(&'a mut ActionLibrary);
 
 impl<'a> Lookup<'a> {
-    fn action(
-        &self,
-        str: &str,
-        args: Option<Vec<String>>,
-        range: Range<usize>,
-    ) -> Result<Rc<Action>, ConfigError> {
+    fn action(&self, str: &str, args: Option<Vec<String>>) -> Result<Rc<Action>, ConfigError> {
         self.0
             .get(str.as_ref(), &args)
-            .ok_or_else(|| ConfigError::new("action not found in library", range))
+            .ok_or_else(|| ConfigError::new("action not found in library"))
     }
 
     fn args(&self, args: Option<&str>) -> Option<Vec<String>> {
@@ -96,7 +92,7 @@ impl<'a> Lookup<'a> {
         }
     }
 
-    fn flags(&self, flags: &str, range: Range<usize>) -> Result<Vec<Flag>, ConfigError> {
+    fn flags(&self, flags: &str) -> Result<Vec<Flag>, ConfigError> {
         let flag_vec = FLAG_REGEX
             .find_iter(flags)
             .map(|f| match f.as_str().strip_prefix(":").unwrap() {
@@ -109,11 +105,11 @@ impl<'a> Lookup<'a> {
             })
             .collect::<Vec<_>>();
         if flag_vec.contains(&None) {
-            return Err(ConfigError::new("unrecogized flag", range));
+            return Err(ConfigError::new("unrecogized flag"));
         }
         let flag_vec: Vec<_> = flag_vec.iter().flatten().cloned().collect();
         if flag_vec.iter().filter(|f| vec![Flag::Up, Flag::Repeat].contains(*f)).count() > 1 {
-            return Err(ConfigError::new("multiple mode-setting flags", range));
+            return Err(ConfigError::new("multiple mode-setting flags"));
         }
         if flag_vec
             .iter()
@@ -121,7 +117,7 @@ impl<'a> Lookup<'a> {
             .count()
             > 1
         {
-            return Err(ConfigError::new("multiple rate flags", range));
+            return Err(ConfigError::new("multiple rate flags"));
         }
         Ok(flag_vec)
     }
@@ -131,11 +127,10 @@ impl<'a> Lookup<'a> {
         action_str: &str,
         args_str: Option<&str>,
         flags_str: &str,
-        range: Range<usize>,
     ) -> Result<(Rc<Action>, Vec<Flag>), ConfigError> {
         let args = self.args(args_str);
-        let mut action = self.action(action_str, args, range.clone())?;
-        let flags = self.flags(flags_str, range.clone())?;
+        let mut action = self.action(action_str, args)?;
+        let flags = self.flags(flags_str)?;
 
         let mut mods = Vec::new();
         let mut non_mods_flags = Vec::new();
@@ -145,7 +140,7 @@ impl<'a> Lookup<'a> {
                 Flag::Rev => {
                     action = action
                         .reverse()
-                        .ok_or_else(|| ConfigError::new("action is not reversible", range.clone()))?
+                        .ok_or_else(|| ConfigError::new("action is not reversible"))?
                         .into()
                 }
                 _ => non_mods_flags.push(flag),
@@ -156,25 +151,23 @@ impl<'a> Lookup<'a> {
             let modifiers = mods.iter().fold(Modifiers::default(), |acc, m| acc.union(m));
             action = action
                 .with_modifiers(&modifiers)
-                .ok_or_else(|| ConfigError::new("action cannot be modified", range.clone()))?
+                .ok_or_else(|| ConfigError::new("action cannot be modified"))?
                 .into()
         }
 
         Ok((action, non_mods_flags))
     }
 
-    fn button_bind(&self, str: Spanned<String>) -> Result<Rc<Bind>, ConfigError> {
-        let range = str.span();
+    fn button_bind(&self, str: String) -> Result<Rc<Bind>, ConfigError> {
         let captures = DOUBLE_REGEX
             .captures(str.as_ref())
             .or_else(|| SINGLE_REGEX.captures(str.as_ref()))
-            .ok_or_else(|| ConfigError::new("invalid button", range.clone()))?;
+            .ok_or_else(|| ConfigError::new("invalid button"))?;
 
         let action_str = captures.name("action").expect("action name should exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
         let flags_str = captures.name("flags").unwrap().as_str();
-        let (action, flags) =
-            self.action_and_flags(action_str, args_str, flags_str, range.clone())?;
+        let (action, flags) = self.action_and_flags(action_str, args_str, flags_str)?;
 
         // If we've got an alt_action or a :rev flag, we're parsing an AB button
         if captures.name("alt_action").is_some() {
@@ -183,10 +176,10 @@ impl<'a> Lookup<'a> {
             let alt_args_str = captures.name("alt_args").map(|a| a.as_str());
             let alt_flags_str = captures.name("alt_flags").unwrap().as_str();
             let (alt_action, alt_flags) =
-                self.action_and_flags(alt_action_str, alt_args_str, alt_flags_str, range.clone())?;
+                self.action_and_flags(alt_action_str, alt_args_str, alt_flags_str)?;
 
             if !alt_flags.is_empty() {
-                return Err(ConfigError::new("AB binds accept no other flags", range.clone()));
+                return Err(ConfigError::new("AB binds accept no other flags"));
             }
 
             return Ok(Bind::ButtonAB(action.into(), alt_action.into()).into());
@@ -203,27 +196,25 @@ impl<'a> Lookup<'a> {
         Ok(bind.into())
     }
 
-    fn button_bind_opt(&self, str: Spanned<String>) -> Option<Rc<Bind>> {
+    fn button_bind_opt(&self, str: String) -> Option<Rc<Bind>> {
         self.button_bind(str).inspect_err(|e| error!("{}", e)).ok()
     }
 
     #[cfg(test)]
     fn button_bind_str(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
-        self.button_bind(Spanned::new(0..str.len(), str.to_owned()))
+        self.button_bind(str.to_owned())
     }
 
-    fn scroll_bind(&self, str: Spanned<String>) -> Result<Rc<Bind>, ConfigError> {
-        let range = str.span();
+    fn scroll_bind(&self, str: String) -> Result<Rc<Bind>, ConfigError> {
         let captures = DOUBLE_REGEX
-            .captures(str.get_ref())
-            .or_else(|| SINGLE_REGEX.captures(str.get_ref()))
-            .ok_or_else(|| ConfigError::new("invalid scroll", range.clone()))?;
+            .captures(&str)
+            .or_else(|| SINGLE_REGEX.captures(&str))
+            .ok_or_else(|| ConfigError::new("invalid scroll"))?;
 
         let action_str = captures.name("action").expect("action name should exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
         let flags_str = captures.name("flags").unwrap().as_str();
-        let (action, flags) =
-            self.action_and_flags(action_str, args_str, flags_str, range.clone())?;
+        let (action, flags) = self.action_and_flags(action_str, args_str, flags_str)?;
 
         let (alt_action, alt_flags) = if captures.name("alt_action").is_some() {
             let alt_action_str =
@@ -231,13 +222,13 @@ impl<'a> Lookup<'a> {
             let alt_args_str = captures.name("alt_args").map(|a| a.as_str());
             let alt_flags_str = captures.name("alt_flags").unwrap().as_str();
             let (alt_action, alt_flags) =
-                self.action_and_flags(alt_action_str, alt_args_str, alt_flags_str, range.clone())?;
+                self.action_and_flags(alt_action_str, alt_args_str, alt_flags_str)?;
 
             (alt_action, alt_flags)
         } else {
             let reversed = action
                 .reverse()
-                .ok_or_else(|| ConfigError::new("Action is not reversible", range.clone()))?
+                .ok_or_else(|| ConfigError::new("Action is not reversible"))?
                 .into();
             (reversed, vec![])
         };
@@ -253,29 +244,27 @@ impl<'a> Lookup<'a> {
         Ok(Bind::Scroll { fwd: action.into(), bak: alt_action.into(), rate: rate }.into())
     }
 
-    fn scroll_bind_opt(&self, str: Spanned<String>) -> Option<Rc<Bind>> {
+    fn scroll_bind_opt(&self, str: String) -> Option<Rc<Bind>> {
         self.scroll_bind(str).inspect_err(|e| error!("{}", e)).ok()
     }
 
     #[cfg(test)]
     fn scroll_bind_str(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
-        self.scroll_bind(Spanned::new(0..str.len(), str.to_owned()))
+        self.scroll_bind(str.to_owned())
     }
 
-    fn shortcut_bind(&self, str: Spanned<String>) -> Result<Rc<Action>, ConfigError> {
-        let range = str.span();
+    fn shortcut_bind(&self, str: &String) -> Result<Rc<Action>, ConfigError> {
         let captures = SHORTCUT_REGEX
             .captures(str.as_ref())
-            .ok_or_else(|| ConfigError::new("failed to match shortcut", range.clone()))?;
+            .ok_or_else(|| ConfigError::new("failed to match shortcut"))?;
 
         let action_str = captures.name("action").expect("action name shuold exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
         let flags_str = captures.name("flags").unwrap().as_str();
-        let (action, flags) =
-            self.action_and_flags(action_str, args_str, flags_str, range.clone())?;
+        let (action, flags) = self.action_and_flags(action_str, args_str, flags_str)?;
 
         if !flags.is_empty() {
-            return Err(ConfigError::new("shortcut binds accept no other flags", range.clone()));
+            return Err(ConfigError::new("shortcut binds accept no other flags"));
         }
 
         Ok(action.into())
@@ -357,7 +346,7 @@ pub struct Prime<B> {
     pub tall_short: Option<B>,
 }
 
-impl Prime<Spanned<String>> {
+impl Prime<String> {
     pub fn actualize(self, lookup: &Lookup) -> Prime<Rc<Bind>> {
         Prime {
             side: self.side.and_then(|s| lookup.button_bind_opt(s)),
@@ -387,7 +376,7 @@ pub struct DPad<B> {
     pub right: Option<B>,
 }
 
-impl DPad<Spanned<String>> {
+impl DPad<String> {
     pub fn actualize(self, lookup: &Lookup) -> DPad<Rc<Bind>> {
         DPad {
             up: self.up.and_then(|s| lookup.button_bind_opt(s)),
@@ -427,7 +416,7 @@ impl<B> Kit<B> {
     }
 }
 
-impl Kit<Spanned<String>> {
+impl Kit<String> {
     pub fn actualize(self, lookup: &Lookup) -> Kit<Rc<Bind>> {
         Kit {
             dpad: self.dpad.map(|dp| dp.actualize(&lookup)),
@@ -455,7 +444,7 @@ pub struct Knob<B> {
     pub short_turn: Option<B>,
 }
 
-impl Knob<Spanned<String>> {
+impl Knob<String> {
     pub fn actualize(self, lookup: &Lookup) -> Knob<Rc<Bind>> {
         Knob {
             press: self.press.and_then(|s| lookup.button_bind_opt(s)),
@@ -475,7 +464,7 @@ pub struct Dial<B> {
     pub turn: Option<B>,
 }
 
-impl Dial<Spanned<String>> {
+impl Dial<String> {
     pub fn actualize(self, lookup: &Lookup) -> Dial<Rc<Bind>> {
         Dial {
             press: self.press.and_then(|s| lookup.button_bind_opt(s)),
@@ -484,16 +473,85 @@ impl Dial<Spanned<String>> {
     }
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct Shortcut<A> {
     pub name: String,
     pub action: A,
 }
 
+impl<'de, A> Deserialize<'de> for Shortcut<A>
+where
+    A: Deserialize<'de> + FromStr,
+    <A as FromStr>::Err: std::fmt::Debug,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Name,
+            Action,
+        }
+
+        struct ShortcutVisitor<A>(PhantomData<A>);
+
+        impl<'de, A> Visitor<'de> for ShortcutVisitor<A>
+        where
+            A: Deserialize<'de> + FromStr,
+            <A as FromStr>::Err: std::fmt::Debug,
+        {
+            type Value = Shortcut<A>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct Shortcut or string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Shortcut { name: "".to_string(), action: A::from_str(value).unwrap() })
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
+            where
+                V: serde::de::MapAccess<'de>,
+            {
+                let mut name = None;
+                let mut action = None;
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Name => {
+                            if name.is_some() {
+                                return Err(de::Error::duplicate_field("name"));
+                            }
+                            name = Some(map.next_value()?);
+                        }
+                        Field::Action => {
+                            if action.is_some() {
+                                return Err(de::Error::duplicate_field("action"));
+                            }
+                            action = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
+                let action = action.ok_or_else(|| de::Error::missing_field("action"))?;
+                Ok(Shortcut { name: name, action: action })
+            }
+        }
+
+        const FIELDS: &[&str] = &["name", "action"];
+        deserializer.deserialize_struct("Shortcut", FIELDS, ShortcutVisitor(PhantomData))
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Macro<A> {
+    #[serde(default)]
     pub name: String,
     pub actions: Vec<A>,
 }
@@ -501,6 +559,7 @@ pub struct Macro<A> {
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct MacroGroup<A> {
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub reverse: bool,
@@ -580,7 +639,7 @@ impl<B> Layer<B> {
     }
 }
 
-impl Layer<Spanned<String>> {
+impl Layer<String> {
     pub fn actualize(self, lookup: &Lookup) -> Layer<Rc<Bind>> {
         Layer {
             prime: self.prime.map(|v| v.actualize(&lookup)),
@@ -593,24 +652,26 @@ impl Layer<Spanned<String>> {
 }
 
 #[derive(Debug)]
-pub struct RawConfig<A, B> {
+pub struct RawConfig<Actn, Bnd, Shrt> {
     pub name: String,
-    pub base: Layer<B>,
-    pub layers: HashMap<String, Layer<B>>,
-    pub shortcuts: HashMap<String, Shortcut<A>>,
-    pub macros: HashMap<String, Macro<A>>,
-    pub macro_groups: HashMap<String, MacroGroup<A>>,
-    pub menus: HashMap<String, Rc<Menu<A>>>,
+    pub base: Layer<Bnd>,
+    pub layers: HashMap<String, Layer<Bnd>>,
+    pub shortcuts: HashMap<String, Shrt>,
+    pub macros: HashMap<String, Macro<Actn>>,
+    pub macro_groups: HashMap<String, MacroGroup<Actn>>,
+    pub menus: HashMap<String, Rc<Menu<Actn>>>,
     pub library: Option<ActionLibrary>,
 }
 
-pub type StringConfig = RawConfig<Spanned<String>, Spanned<String>>;
-pub type Config = RawConfig<Rc<Action>, Rc<Bind>>;
+/// As deserialized from the TOML file
+pub type StringConfig = RawConfig<String, String, Shortcut<String>>;
+/// As parsed by this module to assign actions, binds, and shortcuts
+pub type Config = RawConfig<Rc<Action>, Rc<Bind>, Shortcut<Rc<Action>>>;
 
 pub static MENU_LAYER_TOML: &'static str = include_str!("menu_layer.toml");
 
 pub fn generate_menu_layer(lookup: &Lookup) -> Layer<Rc<Bind>> {
-    toml::from_str::<Layer<Spanned<String>>>(MENU_LAYER_TOML).unwrap().actualize(lookup)
+    toml::from_str::<Layer<String>>(MENU_LAYER_TOML).unwrap().actualize(lookup)
 }
 
 impl Config {
@@ -673,8 +734,8 @@ impl StringConfig {
             .shortcuts
             .into_iter()
             .map(|(key, c_shortcut)| {
-                let action = lookup.shortcut_bind(c_shortcut.action)?;
-                Ok((key, Shortcut { name: c_shortcut.name, action }))
+                let action = lookup.shortcut_bind(&c_shortcut.action)?;
+                Ok((key, Shortcut { name: "".to_string(), action }))
             })
             .collect::<Result<_, _>>()?;
 
@@ -685,7 +746,7 @@ impl StringConfig {
                 let actions = c_macro
                     .actions
                     .into_iter()
-                    .map(|a| lookup.shortcut_bind(a))
+                    .map(|a| lookup.shortcut_bind(&a))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((key, Macro { name: c_macro.name, actions }))
             })
@@ -699,7 +760,7 @@ impl StringConfig {
                     .groups
                     .into_iter()
                     .map(|v| {
-                        v.into_iter().map(|a| lookup.shortcut_bind(a)).collect::<Result<_, _>>()
+                        v.into_iter().map(|a| lookup.shortcut_bind(&a)).collect::<Result<_, _>>()
                     })
                     .collect::<Result<_, _>>()?;
                 Ok((
@@ -717,7 +778,7 @@ impl StringConfig {
                     .entries
                     .clone()
                     .into_iter()
-                    .map(|a| lookup.shortcut_bind(a))
+                    .map(|a| lookup.shortcut_bind(&a))
                     .collect::<Result<_, _>>()?;
                 let menu = Menu {
                     name: c_menu.name.clone(),
@@ -762,11 +823,7 @@ impl StringConfig {
 
 /// Manual implementation until `toml::Spanned` works alongside `#[serde(flatten)]`
 /// See: <https://github.com/toml-rs/toml/issues/589>
-impl<'de, A, B> Deserialize<'de> for RawConfig<A, B>
-where
-    A: serde::Deserialize<'de>,
-    B: serde::Deserialize<'de>,
-{
+impl<'de> Deserialize<'de> for StringConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -787,20 +844,13 @@ where
             Menu,
         }
 
-        struct RawConfigVisitor<A, B> {
-            a: PhantomData<A>,
-            b: PhantomData<B>,
-        }
+        struct StringConfigVisitor {}
 
-        impl<'de, A, B> Visitor<'de> for RawConfigVisitor<A, B>
-        where
-            A: serde::Deserialize<'de>,
-            B: serde::Deserialize<'de>,
-        {
-            type Value = RawConfig<A, B>;
+        impl<'de> Visitor<'de> for StringConfigVisitor {
+            type Value = StringConfig;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("struct RawConfig")
+                formatter.write_str("struct StringConfig")
             }
 
             fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
@@ -894,7 +944,7 @@ where
                     }
                 }
                 let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
-                Ok(RawConfig {
+                Ok(StringConfig {
                     name: name,
                     base: Layer { prime, kit, knob, scroll, dial },
                     layers: layers.unwrap_or_else(|| HashMap::new()),
@@ -909,11 +959,7 @@ where
 
         const FIELDS: &[&str] =
             &["name", "prime", "kit", "knob", "scroll", "dial", "layer", "shortcuts", "macro"];
-        deserializer.deserialize_struct(
-            "RawConfig",
-            FIELDS,
-            RawConfigVisitor { a: PhantomData, b: PhantomData },
-        )
+        deserializer.deserialize_struct("StringConfig", FIELDS, StringConfigVisitor {})
     }
 }
 
@@ -941,7 +987,6 @@ impl ConfigManager {
         let config = toml::from_str::<StringConfig>(&str)
             .expect("config should load")
             .actualize(library)
-            .map_err(|e| e.with_exact_loc(&str))
             .unwrap();
         let name = config.name.clone();
         self.configs.push(Rc::new(config));
