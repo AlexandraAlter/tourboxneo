@@ -2,6 +2,7 @@ use std::{
     fmt,
     io::{Error, Read},
     path::PathBuf,
+    str::FromStr,
     time::Duration,
 };
 
@@ -32,7 +33,9 @@ pub fn open(path: Option<PathBuf>) -> SerialStream {
     SerialStream::open(&builder).unwrap()
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, IntoPrimitive, TryFromPrimitive, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, IntoPrimitive, TryFromPrimitive, Hash,
+)]
 #[repr(u8)]
 pub enum Code {
     Tall = 0x00,
@@ -99,6 +102,95 @@ pub enum Code {
     Macro = 0xfe,
     /// Dummy value used in `Engine` for ongoing menu invocations
     Menu = 0xff,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CodeCategory {
+    Prime,
+    C,
+    Arrow,
+    Scroll,
+    Combo,
+    Other,
+}
+
+impl Code {
+    /// what category is this code in?
+    pub fn category(self: Code) -> CodeCategory {
+        match self {
+            Code::Tall | Code::Side | Code::Top | Code::Short => CodeCategory::Prime,
+            Code::Tour => CodeCategory::Other,
+            Code::Up | Code::Down | Code::Left | Code::Right => CodeCategory::Arrow,
+            Code::C1 | Code::C2 => CodeCategory::C,
+            Code::KnobButton => CodeCategory::Other,
+            Code::Knob | Code::Scroll | Code::Dial => CodeCategory::Scroll,
+            Code::ScrollButton => CodeCategory::Other,
+            Code::DialButton | Code::Macro | Code::Menu => CodeCategory::Other,
+            _ => CodeCategory::Combo,
+        }
+    }
+
+    /// is this a basic one-key code?
+    pub fn is_basic(self: Code) -> bool {
+        match self {
+            Code::Tall | Code::Side | Code::Top | Code::Short => true,
+            Code::Tour => true,
+            Code::Up | Code::Down | Code::Left | Code::Right => true,
+            Code::C1 | Code::C2 => true,
+            Code::KnobButton | Code::Knob => true,
+            Code::ScrollButton | Code::Scroll => true,
+            Code::DialButton | Code::Dial => true,
+            _ => false,
+        }
+    }
+
+    /// if this is a double-press, return the single-press version
+    pub fn dedup(self: Code) -> Code {
+        match self {
+            Code::TallDbl => Code::Tall,
+            Code::SideDbl => Code::Side,
+            Code::TopDbl => Code::Top,
+            Code::ShortDbl => Code::Short,
+            _ => self,
+        }
+    }
+
+    /// is this a combination of codes that matches a builtin combo?
+    /// assumes `codes` is sorted
+    pub fn is_builtin_combo(codes: &Vec<Code>) -> bool {
+        match codes.len() {
+            0 => false,
+            1 => true,
+            2 => {
+                let k1 = *codes.get(0).unwrap();
+                let k2 = *codes.get(1).unwrap();
+
+                (k1 == k2)
+                    || (k1.category() == CodeCategory::Prime
+                        && k2.category() == CodeCategory::Prime)
+                    || (k1.category() == CodeCategory::Prime
+                        && (k2 == Code::Dial || k2 == Code::Scroll))
+                    || ((k1 == Code::Tall || k1 == Code::Short) && k2.category() == CodeCategory::C)
+                    || ((k1 == Code::Top || k1 == Code::Side)
+                        && k2.category() == CodeCategory::Arrow)
+            }
+            _ => false,
+        }
+    }
+
+    /// is this a combination of codes that cannot be produced?
+    /// assumes `codes` is sorted
+    pub fn is_impossible_combo(codes: &Vec<Code>) -> bool {
+        match codes.len() {
+            0 => true,
+            1 => false,
+            2 => {
+                // TODO expand this
+                false
+            }
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for Code {

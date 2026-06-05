@@ -211,6 +211,7 @@ impl ActionLibrary {
         ActionLibrary { parent, actions: HashMap::new(), action_fns: HashMap::new() }
     }
 
+    // TODO: make this return result
     pub fn get(&self, key: &str, args: &Option<Vec<String>>) -> Option<Rc<Action>> {
         self.actions
             .get(key)

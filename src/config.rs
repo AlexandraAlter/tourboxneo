@@ -1,7 +1,7 @@
-use std::{collections::HashMap, fmt, fs, path::PathBuf, rc::Rc};
+use std::{collections::HashMap, fmt, fs, hash::Hash, path::PathBuf, rc::Rc, str::FromStr};
 
 use heck::ToTitleCase;
-use log::{error, info, warn};
+use log::info;
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -10,16 +10,19 @@ use serde::{
     de::{self, Visitor},
 };
 
-use crate::actions::{Action, ActionLibrary, Modifiers};
+use crate::{
+    actions::{Action, ActionLibrary, Modifiers},
+    serial::{Code, CodeCategory},
+};
 
 #[derive(Debug, Clone)]
 pub struct ConfigError {
-    msg: &'static str,
+    msg: String,
     path: Vec<String>,
 }
 
 impl ConfigError {
-    pub fn new(msg: &'static str) -> Self {
+    pub fn new(msg: String) -> Self {
         Self { msg: msg, path: Vec::new() }
     }
 
@@ -27,11 +30,15 @@ impl ConfigError {
         self.path.insert(0, value.to_string());
         self
     }
+
+    pub fn path_or_dot(&self) -> String {
+        if self.path.is_empty() { ".".to_owned() } else { self.path.join(".") }
+    }
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Config error at {}: {}", self.path.join("."), self.msg)
+        write!(f, "Config error at {}: {}", self.path_or_dot(), self.msg)
     }
 }
 
@@ -82,6 +89,14 @@ lazy_static! {
     };
     static ref ARGUMENT_REGEX: Regex = Regex::new(r"[[:word:]]+").expect("regex should compile");
     static ref FLAG_REGEX: Regex = Regex::new(r":[[:word:]]+").expect("regex should compile");
+    static ref SERIAL_CODE_REGEX: Regex = {
+        Regex::new(
+            r"(?x)
+                ^\s*(?P<code>[[:word:]]+)\s*x(?P<count>[[:digit:]]+)\s*$
+            ",
+        )
+        .expect("regex should compile")
+    };
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -99,7 +114,7 @@ impl<'a> Lookup<'a> {
     fn action(&self, str: &str, args: Option<Vec<String>>) -> Result<Rc<Action>, ConfigError> {
         self.0
             .get(str.as_ref(), &args)
-            .ok_or_else(|| ConfigError::new("action not found in library"))
+            .ok_or_else(|| ConfigError::new(format!("action not found in library: {}", str)))
     }
 
     fn args(&self, args: Option<&str>) -> Option<Vec<String>> {
@@ -124,11 +139,12 @@ impl<'a> Lookup<'a> {
             })
             .collect::<Vec<_>>();
         if flag_vec.contains(&None) {
-            return Err(ConfigError::new("unrecogized flag"));
+            // TODO: pass the exact flag in
+            return Err(ConfigError::new(format!("unrecogized flag: {}", flags)));
         }
         let flag_vec: Vec<_> = flag_vec.iter().flatten().cloned().collect();
         if flag_vec.iter().filter(|f| vec![Flag::Up, Flag::Repeat].contains(*f)).count() > 1 {
-            return Err(ConfigError::new("multiple mode-setting flags"));
+            return Err(ConfigError::new("multiple mode-setting flags".to_owned()));
         }
         if flag_vec
             .iter()
@@ -136,7 +152,7 @@ impl<'a> Lookup<'a> {
             .count()
             > 1
         {
-            return Err(ConfigError::new("multiple rate flags"));
+            return Err(ConfigError::new("multiple rate flags".to_owned()));
         }
         Ok(flag_vec)
     }
@@ -159,7 +175,9 @@ impl<'a> Lookup<'a> {
                 Flag::Rev => {
                     action = action
                         .reverse()
-                        .ok_or_else(|| ConfigError::new("action is not reversible"))?
+                        .ok_or_else(|| {
+                            ConfigError::new(format!("action is not reversible: {}", action_str))
+                        })?
                         .into()
                 }
                 _ => non_mods_flags.push(flag),
@@ -170,18 +188,20 @@ impl<'a> Lookup<'a> {
             let modifiers = mods.iter().fold(Modifiers::default(), |acc, m| acc.union(m));
             action = action
                 .with_modifiers(&modifiers)
-                .ok_or_else(|| ConfigError::new("action cannot be modified"))?
+                .ok_or_else(|| {
+                    ConfigError::new(format!("action cannot be modified: {}", action_str))
+                })?
                 .into()
         }
 
         Ok((action, non_mods_flags))
     }
 
-    fn button_bind(&self, str: String) -> Result<Rc<Bind>, ConfigError> {
+    fn button_bind(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
         let captures = DOUBLE_REGEX
-            .captures(str.as_ref())
-            .or_else(|| SINGLE_REGEX.captures(str.as_ref()))
-            .ok_or_else(|| ConfigError::new("invalid button"))?;
+            .captures(str)
+            .or_else(|| SINGLE_REGEX.captures(str))
+            .ok_or_else(|| ConfigError::new(format!("failed to match button: {}", str)))?;
 
         let action_str = captures.name("action").expect("action name should exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
@@ -198,7 +218,7 @@ impl<'a> Lookup<'a> {
                 self.action_and_flags(alt_action_str, alt_args_str, alt_flags_str)?;
 
             if !alt_flags.is_empty() {
-                return Err(ConfigError::new("AB binds accept no other flags"));
+                return Err(ConfigError::new("AB binds accept no other flags".to_owned()));
             }
 
             return Ok(Bind::ButtonAB(action.into(), alt_action.into()).into());
@@ -215,16 +235,11 @@ impl<'a> Lookup<'a> {
         Ok(bind.into())
     }
 
-    #[cfg(test)]
-    fn button_bind_str(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
-        self.button_bind(str.to_owned())
-    }
-
-    fn scroll_bind(&self, str: String) -> Result<Rc<Bind>, ConfigError> {
+    fn scroll_bind(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
         let captures = DOUBLE_REGEX
-            .captures(&str)
-            .or_else(|| SINGLE_REGEX.captures(&str))
-            .ok_or_else(|| ConfigError::new("invalid scroll"))?;
+            .captures(str)
+            .or_else(|| SINGLE_REGEX.captures(str))
+            .ok_or_else(|| ConfigError::new(format!("failed to match scroll: {}", str)))?;
 
         let action_str = captures.name("action").expect("action name should exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
@@ -243,7 +258,9 @@ impl<'a> Lookup<'a> {
         } else {
             let reversed = action
                 .reverse()
-                .ok_or_else(|| ConfigError::new("action is not reversible"))?
+                .ok_or_else(|| {
+                    ConfigError::new(format!("action is not reversible: {}", action_str))
+                })?
                 .into();
             (reversed, vec![])
         };
@@ -252,6 +269,7 @@ impl<'a> Lookup<'a> {
         for f in flags.iter().chain(alt_flags.iter()) {
             match f {
                 Flag::Rate(r) => rate = *r,
+                // TODO make this not panic
                 _ => panic!("unrecognised flag: {:?}", f),
             }
         }
@@ -259,15 +277,10 @@ impl<'a> Lookup<'a> {
         Ok(Bind::Scroll { fwd: action.into(), bak: alt_action.into(), rate: rate }.into())
     }
 
-    #[cfg(test)]
-    fn scroll_bind_str(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
-        self.scroll_bind(str.to_owned())
-    }
-
-    fn shortcut_bind(&self, str: &String) -> Result<Rc<Action>, ConfigError> {
+    fn shortcut_bind(&self, str: &str) -> Result<Rc<Action>, ConfigError> {
         let captures = SHORTCUT_REGEX
             .captures(str.as_ref())
-            .ok_or_else(|| ConfigError::new("failed to match shortcut"))?;
+            .ok_or_else(|| ConfigError::new(format!("failed to match shortcut: {}", str)))?;
 
         let action_str = captures.name("action").expect("action name should exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
@@ -275,10 +288,21 @@ impl<'a> Lookup<'a> {
         let (action, flags) = self.action_and_flags(action_str, args_str, flags_str)?;
 
         if !flags.is_empty() {
-            return Err(ConfigError::new("shortcut binds accept no other flags"));
+            return Err(ConfigError::new("shortcut binds accept no other flags".to_owned()));
         }
 
         Ok(action.into())
+    }
+
+    fn custom_bind(
+        &self,
+        code_str: &str,
+        bind_str: &str,
+    ) -> Result<(CustomCode, Rc<Bind>), ConfigError> {
+        let code = CustomCode::from_str(code_str)?;
+        let bind =
+            if code.is_scroll() { self.scroll_bind(bind_str) } else { self.button_bind(bind_str) };
+        Ok((code, bind.map_err(|e| e.with_path(code_str))?))
     }
 
     fn library(&mut self) -> &mut ActionLibrary {
@@ -338,7 +362,7 @@ impl fmt::Display for Bind {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Prime<B> {
     pub side: Option<B>,
@@ -361,72 +385,72 @@ impl Prime<String> {
     pub fn actualize(self, lookup: &Lookup) -> Result<Prime<Rc<Bind>>, ConfigError> {
         let side = self
             .side
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("side"))?;
         let side_x2 = self
             .side_x2
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("side_x2"))?;
         let top = self
             .top
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("top"))?;
         let top_x2 = self
             .top_x2
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("top_x2"))?;
         let tall = self
             .tall
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("tall"))?;
         let tall_x2 = self
             .tall_x2
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("tall_x2"))?;
         let short = self
             .short
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("short"))?;
         let short_x2 = self
             .short_x2
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("short_x2"))?;
         let side_top = self
             .side_top
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("side_top"))?;
         let side_tall = self
             .side_tall
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("side_tall"))?;
         let side_short = self
             .side_short
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("side_short"))?;
         let top_tall = self
             .top_tall
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("top_tall"))?;
         let top_short = self
             .top_short
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("top_short"))?;
         let tall_short = self
             .tall_short
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("tall_short"))?;
 
@@ -449,7 +473,7 @@ impl Prime<String> {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct DPad<B> {
     pub up: Option<B>,
@@ -462,22 +486,22 @@ impl DPad<String> {
     pub fn actualize(self, lookup: &Lookup) -> Result<DPad<Rc<Bind>>, ConfigError> {
         let up = self
             .up
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("up"))?;
         let down = self
             .down
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("down"))?;
         let left = self
             .left
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("left"))?;
         let right = self
             .right
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("right"))?;
 
@@ -485,12 +509,15 @@ impl DPad<String> {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Kit<B> {
-    pub dpad: Option<DPad<B>>,
-    pub side_dpad: Option<DPad<B>>,
-    pub top_dpad: Option<DPad<B>>,
+    #[serde(default)]
+    pub dpad: DPad<B>,
+    #[serde(default)]
+    pub side_dpad: DPad<B>,
+    #[serde(default)]
+    pub top_dpad: DPad<B>,
     pub c1: Option<B>,
     pub c2: Option<B>,
     pub tall_c1: Option<B>,
@@ -500,70 +527,44 @@ pub struct Kit<B> {
     pub tour: Option<B>,
 }
 
-impl<B> Kit<B> {
-    pub fn dpad_ref(&self) -> Option<&DPad<B>> {
-        self.dpad.as_ref()
-    }
-
-    pub fn side_dpad_ref(&self) -> Option<&DPad<B>> {
-        self.side_dpad.as_ref()
-    }
-
-    pub fn top_dpad_ref(&self) -> Option<&DPad<B>> {
-        self.top_dpad.as_ref()
-    }
-}
-
 impl Kit<String> {
     pub fn actualize(self, lookup: &Lookup) -> Result<Kit<Rc<Bind>>, ConfigError> {
-        let dpad = self
-            .dpad
-            .map(|dp| dp.actualize(&lookup))
-            .transpose()
-            .map_err(|e| e.with_path("dpad"))?;
-        let side_dpad = self
-            .side_dpad
-            .map(|dp| dp.actualize(&lookup))
-            .transpose()
-            .map_err(|e| e.with_path("side_dpad"))?;
-        let top_dpad = self
-            .top_dpad
-            .map(|dp| dp.actualize(&lookup))
-            .transpose()
-            .map_err(|e| e.with_path("top_dpad"))?;
+        let dpad = self.dpad.actualize(&lookup).map_err(|e| e.with_path("dpad"))?;
+        let side_dpad = self.side_dpad.actualize(&lookup).map_err(|e| e.with_path("side_dpad"))?;
+        let top_dpad = self.top_dpad.actualize(&lookup).map_err(|e| e.with_path("top_dpad"))?;
         let c1 = self
             .c1
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("c1"))?;
         let c2 = self
             .c2
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("c2"))?;
         let tall_c1 = self
             .tall_c1
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("tall_c1"))?;
         let tall_c2 = self
             .tall_c2
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("tall_c2"))?;
         let short_c1 = self
             .short_c1
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("short_c1"))?;
         let short_c2 = self
             .short_c2
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("short_c2"))?;
         let tour = self
             .tour
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("tour"))?;
 
@@ -571,7 +572,7 @@ impl Kit<String> {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Knob<B> {
     pub press: Option<B>,
@@ -586,32 +587,32 @@ impl Knob<String> {
     pub fn actualize(self, lookup: &Lookup) -> Result<Knob<Rc<Bind>>, ConfigError> {
         let press = self
             .press
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("press"))?;
         let turn = self
             .turn
-            .and_then(|s| Some(lookup.scroll_bind(s)))
+            .and_then(|s| Some(lookup.scroll_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("turn"))?;
         let side_turn = self
             .side_turn
-            .and_then(|s| Some(lookup.scroll_bind(s)))
+            .and_then(|s| Some(lookup.scroll_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("side_turn"))?;
         let top_turn = self
             .top_turn
-            .and_then(|s| Some(lookup.scroll_bind(s)))
+            .and_then(|s| Some(lookup.scroll_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("top_turn"))?;
         let tall_turn = self
             .tall_turn
-            .and_then(|s| Some(lookup.scroll_bind(s)))
+            .and_then(|s| Some(lookup.scroll_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("tall_turn"))?;
         let short_turn = self
             .short_turn
-            .and_then(|s| Some(lookup.scroll_bind(s)))
+            .and_then(|s| Some(lookup.scroll_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("short_turn"))?;
 
@@ -619,7 +620,7 @@ impl Knob<String> {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Dial<B> {
     pub press: Option<B>,
@@ -630,12 +631,12 @@ impl Dial<String> {
     pub fn actualize(self, lookup: &Lookup) -> Result<Dial<Rc<Bind>>, ConfigError> {
         let press = self
             .press
-            .and_then(|s| Some(lookup.button_bind(s)))
+            .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("press"))?;
         let turn = self
             .turn
-            .and_then(|s| Some(lookup.scroll_bind(s)))
+            .and_then(|s| Some(lookup.scroll_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("turn"))?;
 
@@ -770,88 +771,161 @@ pub struct Menu<Name, Action> {
     pub select: Option<usize>,
 }
 
+// only used for custom codes, so we only cover the base keys
+impl FromStr for Code {
+    type Err = ConfigError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "tall" => Ok(Code::Tall),
+            "side" => Ok(Code::Side),
+            "top" => Ok(Code::Top),
+            "short" => Ok(Code::Short),
+
+            "tour" => Ok(Code::Tour),
+
+            "up" => Ok(Code::Up),
+            "down" => Ok(Code::Down),
+            "left" => Ok(Code::Left),
+            "right" => Ok(Code::Right),
+
+            "c1" => Ok(Code::C1),
+            "c2" => Ok(Code::C2),
+
+            "knob_down" => Ok(Code::KnobButton),
+            "knob" => Ok(Code::Knob),
+
+            "scroll_down" => Ok(Code::ScrollButton),
+            "scroll" => Ok(Code::Scroll),
+
+            "dial_down" => Ok(Code::DialButton),
+            "dial" => Ok(Code::Dial),
+
+            _ => Err(ConfigError::new(format!("invalid custom code {}", s))),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, Debug)]
+pub enum CustomCode {
+    /// repeated tap of one input
+    Series(Code, usize),
+    /// several tapped inputs
+    Parallel(Vec<Code>),
+}
+
+impl CustomCode {
+    pub fn is_scroll(&self) -> bool {
+        match self {
+            CustomCode::Series(_, _) => false,
+            CustomCode::Parallel(codes) => {
+                codes.iter().find(|c| c.category() == CodeCategory::Scroll).is_some()
+            }
+        }
+    }
+}
+
+impl FromStr for CustomCode {
+    type Err = ConfigError;
+
+    fn from_str(str: &str) -> Result<Self, Self::Err> {
+        match SERIAL_CODE_REGEX.captures(str.as_ref()) {
+            Some(captures) => {
+                let code_str = captures.name("code").expect("code should be present").as_str();
+                let code = Code::from_str(code_str)?;
+                let count_str = captures.name("count").expect("count should be present").as_str();
+                let count = usize::from_str(count_str).map_err(|_e| {
+                    ConfigError::new(format!("unable to parse custom code's count: {}", count_str))
+                })?;
+                Ok(CustomCode::Series(code, count))
+            }
+            None => {
+                let mut components =
+                    str.split("+")
+                        .map(|c| Code::from_str(c))
+                        .collect::<Result<Vec<_>, ConfigError>>()?;
+                components.sort();
+                if Code::is_impossible_combo(&components) {
+                    return Err(ConfigError::new(format!(
+                        "custom code is impossible to input: {}",
+                        str
+                    )));
+                }
+                if Code::is_builtin_combo(&components) {
+                    return Err(ConfigError::new(format!(
+                        "custom code overlaps a built-in code: {}",
+                        str
+                    )));
+                }
+                Ok(CustomCode::Parallel(components))
+            }
+        }
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct Layer<Name, Bind> {
+pub struct Layer<Name, Custom, Bind>
+where
+    Custom: Eq + Hash,
+{
     #[serde(default)]
     pub name: Name,
-    pub prime: Option<Prime<Bind>>,
-    pub kit: Option<Kit<Bind>>,
-    pub knob: Option<Knob<Bind>>,
-    pub scroll: Option<Knob<Bind>>,
-    pub dial: Option<Dial<Bind>>,
+    #[serde(default)]
+    pub prime: Prime<Bind>,
+    #[serde(default)]
+    pub kit: Kit<Bind>,
+    #[serde(default)]
+    pub knob: Knob<Bind>,
+    #[serde(default)]
+    pub scroll: Knob<Bind>,
+    #[serde(default)]
+    pub dial: Dial<Bind>,
+    #[serde(default)]
+    pub custom: HashMap<Custom, Bind>,
 }
 
-impl<Name, Bind> Layer<Name, Bind> {
-    pub fn prime_ref(&self) -> Option<&Prime<Bind>> {
-        self.prime.as_ref()
-    }
+impl Layer<(), String, String> {
+    pub fn actualize(
+        self,
+        lookup: &Lookup,
+    ) -> Result<Layer<(), CustomCode, Rc<Bind>>, ConfigError> {
+        let prime = self.prime.actualize(&lookup).map_err(|e| e.with_path("prime"))?;
+        let kit = self.kit.actualize(&lookup).map_err(|e| e.with_path("kit"))?;
+        let knob = self.knob.actualize(&lookup).map_err(|e| e.with_path("knob"))?;
+        let scroll = self.scroll.actualize(&lookup).map_err(|e| e.with_path("scroll"))?;
+        let dial = self.dial.actualize(&lookup).map_err(|e| e.with_path("dial"))?;
+        let custom = self
+            .custom
+            .into_iter()
+            .map(|(k, v)| lookup.custom_bind(&k, &v))
+            .collect::<Result<HashMap<_, _>, ConfigError>>()
+            .map_err(|e| e.with_path("custom"))?;
 
-    pub fn kit_ref(&self) -> Option<&Kit<Bind>> {
-        self.kit.as_ref()
-    }
-
-    pub fn knob_ref(&self) -> Option<&Knob<Bind>> {
-        self.knob.as_ref()
-    }
-
-    pub fn scroll_ref(&self) -> Option<&Knob<Bind>> {
-        self.scroll.as_ref()
-    }
-
-    pub fn dial_ref(&self) -> Option<&Dial<Bind>> {
-        self.dial.as_ref()
-    }
-}
-
-impl Layer<(), String> {
-    pub fn actualize(self, lookup: &Lookup) -> Result<Layer<(), Rc<Bind>>, ConfigError> {
-        let prime = self
-            .prime
-            .map(|v| v.actualize(&lookup))
-            .transpose()
-            .map_err(|e| e.with_path("prime"))?;
-        let kit =
-            self.kit.map(|v| v.actualize(&lookup)).transpose().map_err(|e| e.with_path("kit"))?;
-        let knob =
-            self.knob.map(|v| v.actualize(&lookup)).transpose().map_err(|e| e.with_path("knob"))?;
-        let scroll = self
-            .scroll
-            .map(|v| v.actualize(&lookup))
-            .transpose()
-            .map_err(|e| e.with_path("scroll"))?;
-        let dial =
-            self.dial.map(|v| v.actualize(&lookup)).transpose().map_err(|e| e.with_path("dial"))?;
-
-        Ok(Layer { name: (), prime, kit, knob, scroll, dial })
+        Ok(Layer { name: (), prime, kit, knob, scroll, dial, custom })
     }
 }
 
-impl Layer<Option<String>, String> {
+impl Layer<Option<String>, String, String> {
     pub fn actualize(
         self,
         key: &str,
         lookup: &Lookup,
-    ) -> Result<Layer<String, Rc<Bind>>, ConfigError> {
+    ) -> Result<Layer<String, CustomCode, Rc<Bind>>, ConfigError> {
         let name = self.name.unwrap_or_else(|| key.to_title_case());
-        let prime = self
-            .prime
-            .map(|v| v.actualize(&lookup))
-            .transpose()
-            .map_err(|e| e.with_path("prime"))?;
-        let kit =
-            self.kit.map(|v| v.actualize(&lookup)).transpose().map_err(|e| e.with_path("kit"))?;
-        let knob =
-            self.knob.map(|v| v.actualize(&lookup)).transpose().map_err(|e| e.with_path("knob"))?;
-        let scroll = self
-            .scroll
-            .map(|v| v.actualize(&lookup))
-            .transpose()
-            .map_err(|e| e.with_path("scroll"))?;
-        let dial =
-            self.dial.map(|v| v.actualize(&lookup)).transpose().map_err(|e| e.with_path("dial"))?;
+        let prime = self.prime.actualize(&lookup).map_err(|e| e.with_path("prime"))?;
+        let kit = self.kit.actualize(&lookup).map_err(|e| e.with_path("kit"))?;
+        let knob = self.knob.actualize(&lookup).map_err(|e| e.with_path("knob"))?;
+        let scroll = self.scroll.actualize(&lookup).map_err(|e| e.with_path("scroll"))?;
+        let dial = self.dial.actualize(&lookup).map_err(|e| e.with_path("dial"))?;
+        let custom = self
+            .custom
+            .into_iter()
+            .map(|(k, v)| lookup.custom_bind(&k, &v))
+            .collect::<Result<HashMap<_, _>, ConfigError>>()
+            .map_err(|e| e.with_path("custom"))?;
 
-        Ok(Layer { name, prime, kit, knob, scroll, dial })
+        Ok(Layer { name, prime, kit, knob, scroll, dial, custom })
     }
 }
 
@@ -861,9 +935,9 @@ impl Layer<Option<String>, String> {
 pub struct TomlConfig {
     pub name: String,
     #[serde(flatten)]
-    pub base: Layer<(), String>,
+    pub base: Layer<(), String, String>,
     #[serde(default = "HashMap::new")]
-    pub layers: HashMap<String, Layer<Option<String>, String>>,
+    pub layers: HashMap<String, Layer<Option<String>, String, String>>,
     #[serde(default = "HashMap::new")]
     pub shortcuts: HashMap<String, Shortcut<Option<String>, String>>,
     #[serde(default = "HashMap::new")]
@@ -872,16 +946,14 @@ pub struct TomlConfig {
     pub macro_groups: HashMap<String, MacroGroup<Option<String>, String>>,
     #[serde(default = "HashMap::new")]
     pub menus: HashMap<String, Menu<Option<String>, String>>,
-    #[serde(skip)]
-    pub library: Option<ActionLibrary>,
 }
 
 /// As parsed by this module to assign actions, binds, and shortcuts
 #[derive(Debug)]
 pub struct Config {
     pub name: String,
-    pub base: Layer<(), Rc<Bind>>,
-    pub layers: HashMap<String, Layer<String, Rc<Bind>>>,
+    pub base: Layer<(), CustomCode, Rc<Bind>>,
+    pub layers: HashMap<String, Layer<String, CustomCode, Rc<Bind>>>,
     pub shortcuts: HashMap<String, Shortcut<String, Rc<Action>>>,
     pub macros: HashMap<String, Macro<String, Rc<Action>>>,
     pub macro_groups: HashMap<String, MacroGroup<String, Rc<Action>>>,
@@ -891,8 +963,10 @@ pub struct Config {
 
 pub static MENU_LAYER_TOML: &'static str = include_str!("menu_layer.toml");
 
-pub fn generate_menu_layer(lookup: &Lookup) -> Result<Layer<String, Rc<Bind>>, ConfigError> {
-    toml::from_str::<Layer<Option<String>, String>>(MENU_LAYER_TOML)
+pub fn generate_menu_layer(
+    lookup: &Lookup,
+) -> Result<Layer<String, CustomCode, Rc<Bind>>, ConfigError> {
+    toml::from_str::<Layer<Option<String>, String, String>>(MENU_LAYER_TOML)
         .expect("menu layer toml should parse")
         .actualize("menu", lookup)
         .map_err(|e| e.with_path("menu").with_path("layers"))
@@ -900,7 +974,6 @@ pub fn generate_menu_layer(lookup: &Lookup) -> Result<Layer<String, Rc<Bind>>, C
 
 impl Config {
     pub fn lookup_name<'a>(&'a self, action: &'a Action) -> &'a str {
-        let base = "base";
         match action {
             Action::None => "None",
             Action::Mod(modifiers) => "[mod]",
@@ -918,7 +991,7 @@ impl Config {
                 &self.macro_groups.get(name).expect("macro group should exist").name
             }
             Action::Menu(name) => &self.menus.get(name).expect("menu should exist").name,
-            Action::Layer(name) => name.as_ref().map_or(base, |v| v),
+            Action::Layer(name) => name.as_ref().map_or("base", |v| v),
         }
     }
 }
@@ -1202,11 +1275,11 @@ mod tests {
         );
         let lookup = Lookup(&mut library);
 
-        assert!(lookup.button_bind_str("x(1):S:rightalt:up").is_ok());
-        assert!(lookup.button_bind_str("x:D").is_err());
-        assert!(lookup.button_bind_str("x(1)/x(2)").is_ok());
-        assert!(lookup.scroll_bind_str("x(1):alt/x(2):slower:M").is_ok());
-        assert!(lookup.scroll_bind_str("x(1):up").is_err());
+        assert!(lookup.button_bind("x(1):S:rightalt:up").is_ok());
+        assert!(lookup.button_bind("x:D").is_err());
+        assert!(lookup.button_bind("x(1)/x(2)").is_ok());
+        assert!(lookup.scroll_bind(&"x(1):alt/x(2):slower:M").is_ok());
+        assert!(lookup.scroll_bind(&"x(1):up").is_err());
     }
 
     #[test]
@@ -1227,5 +1300,10 @@ mod tests {
         library.insert("b".to_string(), Action::None.into());
         library.insert("c".to_string(), Action::None.into());
         config.actualize(library).unwrap();
+    }
+
+    #[test]
+    fn custom_code_from_str() {
+        assert!(CustomCode::from_str("c2+tour").is_ok());
     }
 }

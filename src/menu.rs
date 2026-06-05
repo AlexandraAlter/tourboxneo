@@ -59,6 +59,10 @@ impl FuzzelMenu {
         &self.last_layer
     }
 
+    pub fn set_last_layer(&mut self, layer: Option<String>) {
+        self.last_layer = layer;
+    }
+
     pub fn read_action(&mut self) -> Result<Option<Rc<Action>>, io::Error> {
         let mut buf = String::new();
         self.receiver.read_to_string(&mut buf)?;
