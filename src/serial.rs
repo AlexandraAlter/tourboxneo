@@ -2,7 +2,6 @@ use std::{
     fmt,
     io::{Error, Read},
     path::PathBuf,
-    str::FromStr,
     time::Duration,
 };
 
@@ -99,9 +98,11 @@ pub enum Code {
     Dial = 0x0f,
 
     /// Dummy value used in `Engine` for ongoing macro invocations
-    Macro = 0xfe,
+    Macro = 0xfd,
     /// Dummy value used in `Engine` for ongoing menu invocations
-    Menu = 0xff,
+    Menu = 0xfe,
+    /// Dummy value used in `Engine` for invalid values
+    None = 0xff,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -110,8 +111,10 @@ pub enum CodeCategory {
     C,
     Arrow,
     Scroll,
+    ScrollPress,
     Combo,
     Other,
+    Dummy,
 }
 
 impl Code {
@@ -122,10 +125,9 @@ impl Code {
             Code::Tour => CodeCategory::Other,
             Code::Up | Code::Down | Code::Left | Code::Right => CodeCategory::Arrow,
             Code::C1 | Code::C2 => CodeCategory::C,
-            Code::KnobButton => CodeCategory::Other,
             Code::Knob | Code::Scroll | Code::Dial => CodeCategory::Scroll,
-            Code::ScrollButton => CodeCategory::Other,
-            Code::DialButton | Code::Macro | Code::Menu => CodeCategory::Other,
+            Code::KnobButton | Code::ScrollButton | Code::DialButton => CodeCategory::ScrollPress,
+            Code::Macro | Code::Menu | Code::None => CodeCategory::Dummy,
             _ => CodeCategory::Combo,
         }
     }
@@ -155,9 +157,77 @@ impl Code {
         }
     }
 
+    /// for any of the scrolling codes, report one of the three base scroll codes
+    pub fn to_scroll_trio(self: Code) -> Option<Code> {
+        match self {
+            Code::Knob => Some(Code::Knob),
+            Code::TallKnob => Some(Code::Knob),
+            Code::ShortKnob => Some(Code::Knob),
+            Code::TopKnob => Some(Code::Knob),
+            Code::SideKnob => Some(Code::Knob),
+
+            Code::Scroll => Some(Code::Scroll),
+            Code::TallScroll => Some(Code::Scroll),
+            Code::ShortScroll => Some(Code::Scroll),
+            Code::TopScroll => Some(Code::Scroll),
+            Code::SideScroll => Some(Code::Scroll),
+
+            Code::Dial => Some(Code::Dial),
+
+            _ => None,
+        }
+    }
+
+    pub fn to_fallback(self: Code) -> Option<(Code, Code)> {
+        match self {
+            Code::TallDbl => Some((Code::Tall, Code::None)),
+            Code::SideDbl => Some((Code::Side, Code::None)),
+            Code::TopDbl => Some((Code::Top, Code::None)),
+            Code::ShortDbl => Some((Code::Short, Code::None)),
+
+            Code::SideTop => Some((Code::Side, Code::Top)),
+            Code::SideTall => Some((Code::Side, Code::Tall)),
+            Code::SideShort => Some((Code::Side, Code::Short)),
+            Code::TopTall => Some((Code::Top, Code::Tall)),
+            Code::TopShort => Some((Code::Top, Code::Short)),
+            Code::TallShort => Some((Code::Tall, Code::Short)),
+
+            Code::SideUp => Some((Code::Side, Code::Up)),
+            Code::SideDown => Some((Code::Side, Code::Down)),
+            Code::SideLeft => Some((Code::Side, Code::Left)),
+            Code::SideRight => Some((Code::Side, Code::Right)),
+
+            Code::TopUp => Some((Code::Top, Code::Up)),
+            Code::TopDown => Some((Code::Top, Code::Down)),
+            Code::TopLeft => Some((Code::Top, Code::Left)),
+            Code::TopRight => Some((Code::Top, Code::Right)),
+
+            Code::TallC1 => Some((Code::Tall, Code::C1)),
+            Code::TallC2 => Some((Code::Tall, Code::C2)),
+
+            Code::ShortC1 => Some((Code::Short, Code::C1)),
+            Code::ShortC2 => Some((Code::Short, Code::C2)),
+
+            Code::TallKnob => Some((Code::Tall, Code::Knob)),
+            Code::ShortKnob => Some((Code::Short, Code::Knob)),
+            Code::TopKnob => Some((Code::Top, Code::Knob)),
+            Code::SideKnob => Some((Code::Side, Code::Knob)),
+
+            Code::TallScroll => Some((Code::Tall, Code::Scroll)),
+            Code::ShortScroll => Some((Code::Short, Code::Scroll)),
+            Code::TopScroll => Some((Code::Top, Code::Scroll)),
+            Code::SideScroll => Some((Code::Side, Code::Scroll)),
+
+            _ => return None,
+        }
+    }
+
     /// is this a combination of codes that matches a builtin combo?
     /// assumes `codes` is sorted
     pub fn is_builtin_combo(codes: &Vec<Code>) -> bool {
+        if !codes.is_sorted() {
+            panic!("unsorted list of codes")
+        }
         match codes.len() {
             0 => false,
             1 => true,
@@ -165,14 +235,15 @@ impl Code {
                 let k1 = *codes.get(0).unwrap();
                 let k2 = *codes.get(1).unwrap();
 
-                (k1 == k2)
-                    || (k1.category() == CodeCategory::Prime
-                        && k2.category() == CodeCategory::Prime)
-                    || (k1.category() == CodeCategory::Prime
-                        && (k2 == Code::Dial || k2 == Code::Scroll))
-                    || ((k1 == Code::Tall || k1 == Code::Short) && k2.category() == CodeCategory::C)
-                    || ((k1 == Code::Top || k1 == Code::Side)
-                        && k2.category() == CodeCategory::Arrow)
+                let two_primes =
+                    k1.category() == CodeCategory::Prime && k2.category() == CodeCategory::Prime;
+                let prime_scroll = k1.category() == CodeCategory::Prime
+                    && (k2 == Code::Knob || k2 == Code::Scroll);
+                let mod_c =
+                    (k1 == Code::Tall || k1 == Code::Short) && k2.category() == CodeCategory::C;
+                let mod_arrow =
+                    (k1 == Code::Top || k1 == Code::Side) && k2.category() == CodeCategory::Arrow;
+                two_primes || prime_scroll || mod_c || mod_arrow
             }
             _ => false,
         }
@@ -181,12 +252,26 @@ impl Code {
     /// is this a combination of codes that cannot be produced?
     /// assumes `codes` is sorted
     pub fn is_impossible_combo(codes: &Vec<Code>) -> bool {
+        if !codes.is_sorted() {
+            panic!("unsorted list of codes")
+        }
         match codes.len() {
             0 => true,
             1 => false,
             2 => {
-                // TODO expand this
-                false
+                let k1 = *codes.get(0).unwrap();
+                let k2 = *codes.get(1).unwrap();
+
+                let eq = k1 == k2;
+                let two_scrolls =
+                    k1.category() == CodeCategory::Scroll && k2.category() == CodeCategory::Scroll;
+                let scroll_and_press = k1.to_scroll_trio() == Some(Code::Knob)
+                    && k2 == Code::KnobButton
+                    || k1.to_scroll_trio() == Some(Code::Scroll) && k2 == Code::ScrollButton
+                    || k2.to_scroll_trio() == Some(Code::Scroll) && k1 == Code::ScrollButton // this one can be backwards
+                    || k1.to_scroll_trio() == Some(Code::Dial) && k2 == Code::DialButton;
+
+                eq || two_scrolls || scroll_and_press
             }
             _ => false,
         }
@@ -276,5 +361,41 @@ impl Source for SerialEventStream {
 
     fn deregister(&mut self, registry: &mio::Registry) -> std::io::Result<()> {
         self.serial.deregister(registry)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_builtins_correct() {
+        assert!(Code::is_builtin_combo(&vec![Code::Tall, Code::Short]));
+        assert!(Code::is_builtin_combo(&vec![Code::Side, Code::Top]));
+        assert!(Code::is_builtin_combo(&vec![Code::Top, Code::Knob]));
+        assert!(Code::is_builtin_combo(&vec![Code::Top, Code::Scroll]));
+        assert!(!Code::is_builtin_combo(&vec![Code::Top, Code::Dial])); // prime+dial isn't builtin
+        assert!(Code::is_builtin_combo(&vec![Code::Tall, Code::C2]));
+        assert!(!Code::is_builtin_combo(&vec![Code::Top, Code::C1])); // top/side+c isn't builtin
+        assert!(Code::is_builtin_combo(&vec![Code::Side, Code::Up]));
+        assert!(!Code::is_builtin_combo(&vec![Code::Short, Code::Down])); // tall/short+arrow isn't builtin
+    }
+
+    #[test]
+    fn code_impossibilities_correct() {
+        assert!(Code::is_impossible_combo(&vec![Code::Tall, Code::Tall])); // duplicate code
+        assert!(Code::is_impossible_combo(&vec![Code::Knob, Code::Dial])); // two scrolls
+        assert!(Code::is_impossible_combo(&vec![Code::Knob, Code::Scroll])); // two scrolls
+        assert!(Code::is_impossible_combo(&vec![Code::Knob, Code::KnobButton])); // matching scroll and press
+        assert!(Code::is_impossible_combo(&vec![Code::TopKnob, Code::KnobButton])); // matching scroll and press
+        assert!(Code::is_impossible_combo(&vec![Code::Scroll, Code::ScrollButton])); // matching scroll and press
+        assert!(Code::is_impossible_combo(&vec![Code::ScrollButton, Code::TallScroll,])); // matching scroll and press
+        assert!(Code::is_impossible_combo(&vec![Code::Dial, Code::DialButton])); // matching scroll and press
+        assert!(!Code::is_impossible_combo(&vec![Code::Knob, Code::ScrollButton])); // non-matching scroll and press is fine
+    }
+
+    #[test]
+    fn input_from_u8() {
+        // TODO
     }
 }

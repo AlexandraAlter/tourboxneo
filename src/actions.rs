@@ -131,6 +131,19 @@ impl Action {
         }
     }
 
+    pub fn mods(&self) -> Option<&Modifiers> {
+        match self {
+            Action::Mod(mods) => Some(mods),
+            Action::Key(_keycode, mods) => mods.as_ref(),
+            Action::PtrMotion(_dx, _dy, mods) => mods.as_ref(),
+            Action::PtrMotionAbs(_x, _y, _x_xt, _y_xt, mods) => mods.as_ref(),
+            Action::PtrButton(_btn, mods) => mods.as_ref(),
+            Action::PtrAxis(_axis, _value, mods) => mods.as_ref(),
+            Action::PtrAxisDiscrete(_axis, _v, _d, mods) => mods.as_ref(),
+            _ => None,
+        }
+    }
+
     pub fn with_modifiers(&self, modifiers: &Modifiers) -> Option<Action> {
         let modmap = move |o: &Option<Modifiers>| {
             o.clone().map(|m| m.union(modifiers)).or(Some(modifiers.clone()))

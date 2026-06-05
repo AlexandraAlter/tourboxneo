@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
+use log::{debug, info, trace, warn};
 use mio::{Events, Interest, Poll, Token};
 
 use crate::actions::{Action, Modifiers};
@@ -66,6 +65,7 @@ impl EngineMsg {
     }
 }
 
+#[derive(Debug)]
 pub struct RepeatTracker {
     pub last_input: Instant,
     pub count: usize,
@@ -74,6 +74,18 @@ pub struct RepeatTracker {
 impl RepeatTracker {
     fn new() -> Self {
         Self { last_input: Instant::now(), count: 0 }
+    }
+}
+
+#[derive(PartialEq, Debug)]
+pub struct HeldActionTracker {
+    pub action: Rc<Action>,
+    pub paused: bool,
+}
+
+impl HeldActionTracker {
+    fn new(action: Rc<Action>) -> Self {
+        Self { action, paused: false }
     }
 }
 
@@ -96,7 +108,7 @@ pub struct Engine {
     /// Held codes, for custom actions
     held_codes: Vec<Code>,
     /// Held actions, helps ensure they're released
-    held_actions: HashMap<Code, Rc<Action>>,
+    held_actions: HashMap<Code, HeldActionTracker>,
     /// Held binds, for repeating events
     // TODO make sure this does anything
     repeating_codes: Vec<Code>,
@@ -147,27 +159,7 @@ impl Engine {
     /// Given two codes, returns which one is not currently being held
     /// Used to calculate fallbacks to more complicated keycodes
     fn missing_code(&self, input_a: Code, input_b: Code) -> Code {
-        if self.held_actions.contains_key(&input_a) { input_b } else { input_a }
-    }
-
-    fn code_to_scroll(&self, input: Code) -> Option<Code> {
-        match input {
-            Code::Knob => Some(Code::Knob),
-            Code::TallKnob => Some(Code::Knob),
-            Code::ShortKnob => Some(Code::Knob),
-            Code::TopKnob => Some(Code::Knob),
-            Code::SideKnob => Some(Code::Knob),
-
-            Code::Scroll => Some(Code::Scroll),
-            Code::TallScroll => Some(Code::Scroll),
-            Code::ShortScroll => Some(Code::Scroll),
-            Code::TopScroll => Some(Code::Scroll),
-            Code::SideScroll => Some(Code::Scroll),
-
-            Code::Dial => Some(Code::Dial),
-
-            _ => None,
-        }
+        if self.held_codes.contains(&input_a) { input_b } else { input_a }
     }
 
     /// Check if we're currently executing a custom bind
@@ -196,48 +188,10 @@ impl Engine {
         layer: &Layer<N, CustomCode, Rc<Bind>>,
         input: Code,
     ) -> Option<Rc<Bind>> {
-        let code = match input {
-            Code::TallDbl => Code::Tall,
-            Code::SideDbl => Code::Side,
-            Code::TopDbl => Code::Top,
-            Code::ShortDbl => Code::Short,
-
-            Code::SideTop => self.missing_code(Code::Side, Code::Top),
-            Code::SideTall => self.missing_code(Code::Side, Code::Tall),
-            Code::SideShort => self.missing_code(Code::Side, Code::Short),
-            Code::TopTall => self.missing_code(Code::Top, Code::Tall),
-            Code::TopShort => self.missing_code(Code::Top, Code::Short),
-            Code::TallShort => self.missing_code(Code::Tall, Code::Short),
-
-            Code::SideUp => self.missing_code(Code::Side, Code::Up),
-            Code::SideDown => self.missing_code(Code::Side, Code::Down),
-            Code::SideLeft => self.missing_code(Code::Side, Code::Left),
-            Code::SideRight => self.missing_code(Code::Side, Code::Right),
-
-            Code::TopUp => self.missing_code(Code::Top, Code::Up),
-            Code::TopDown => self.missing_code(Code::Top, Code::Down),
-            Code::TopLeft => self.missing_code(Code::Top, Code::Left),
-            Code::TopRight => self.missing_code(Code::Top, Code::Right),
-
-            Code::TallC1 => self.missing_code(Code::Tall, Code::C1),
-            Code::TallC2 => self.missing_code(Code::Tall, Code::C2),
-
-            Code::ShortC1 => self.missing_code(Code::Short, Code::C1),
-            Code::ShortC2 => self.missing_code(Code::Short, Code::C2),
-
-            Code::TallKnob => self.missing_code(Code::Tall, Code::Knob),
-            Code::ShortKnob => self.missing_code(Code::Short, Code::Knob),
-            Code::TopKnob => self.missing_code(Code::Top, Code::Knob),
-            Code::SideKnob => self.missing_code(Code::Side, Code::Knob),
-
-            Code::TallScroll => self.missing_code(Code::Tall, Code::Scroll),
-            Code::ShortScroll => self.missing_code(Code::Short, Code::Scroll),
-            Code::TopScroll => self.missing_code(Code::Top, Code::Scroll),
-            Code::SideScroll => self.missing_code(Code::Side, Code::Scroll),
-
-            _ => return None,
-        };
-        self.code_to_bind_inner(layer, code)
+        input.to_fallback().and_then(|(fallback_a, fallback_b)| {
+            let missing = self.missing_code(fallback_a, fallback_b);
+            self.code_to_bind_inner(layer, missing)
+        })
     }
 
     fn code_to_bind_inner<N>(
@@ -350,9 +304,8 @@ impl Engine {
         self.output.mod_remove(*mods.flags());
     }
 
-    fn action_down(&mut self, code: Code, action: Rc<Action>) -> EngineMsg {
+    fn action_down_inner(&mut self, code: Code, action: Rc<Action>) -> EngineMsg {
         let mut msg = EngineMsg::new();
-        self.held_actions.insert(code, action.clone());
         match &*action {
             Action::None => {}
             Action::Mod(mods) => {
@@ -390,14 +343,16 @@ impl Engine {
             }
             Action::Shortcut(name) => {
                 let shortcut = self.config.shortcuts.get(name).expect("macro should exist");
-                msg.append(&mut self.action_down(code, shortcut.action.clone()));
+                msg.append(&mut self.action_down_inner(code, shortcut.action.clone()));
             }
             Action::Macro(name) => {
                 let r#macro = self.config.macros.get(name).expect("macro should exist");
                 let macro_actions = r#macro.actions.to_owned();
-                for a in macro_actions {
-                    self.action_down(Code::Macro, a.clone());
-                    self.action_up(Code::Macro, a.clone());
+                for macro_action in macro_actions {
+                    debug!("{} (down) -> action {}", Code::Macro, macro_action);
+                    self.action_down_inner(Code::Macro, macro_action.clone());
+                    debug!("{} (up) -> action {}", Code::Macro, macro_action);
+                    self.action_up_inner(Code::Macro, macro_action.clone());
                 }
             }
             Action::MacroGroup(name) => {
@@ -414,9 +369,11 @@ impl Engine {
                     r#macro.groups.get(ticker_max - *ticker - 1)
                 };
                 let actions = group.expect("macro group index should be in of bounds").to_owned();
-                for a in actions {
-                    self.action_down(Code::Macro, a.clone());
-                    self.action_up(Code::Macro, a.clone());
+                for macro_action in actions {
+                    debug!("{} (down) -> action {}", Code::Macro, macro_action);
+                    self.action_down_inner(Code::Macro, macro_action.clone());
+                    debug!("{} (up) -> action {}", Code::Macro, macro_action);
+                    self.action_up_inner(Code::Macro, macro_action.clone());
                 }
             }
             Action::Menu(name) => {
@@ -442,14 +399,7 @@ impl Engine {
         msg
     }
 
-    fn action_up(&mut self, code: Code, action: Rc<Action>) {
-        let held_action_opt = self.held_actions.remove(&code);
-        if let Some(held_action) = held_action_opt {
-            if held_action != action {
-                // we've changed layer, release the old action
-                self.action_up(code, held_action);
-            }
-        }
+    fn action_up_inner(&mut self, code: Code, action: Rc<Action>) {
         match &*action {
             Action::None => {}
             Action::Mod(mods) => {
@@ -478,13 +428,67 @@ impl Engine {
             }
             Action::Shortcut(name) => {
                 let shortcut = self.config.shortcuts.get(name).expect("macro should exist");
-                self.action_up(code, shortcut.action.clone())
+                self.action_up_inner(code, shortcut.action.clone())
             }
             Action::Macro(_) => {}
             Action::MacroGroup(_) => {}
             Action::Menu(_) => {}
             Action::Layer(_) => {}
-        };
+        }
+    }
+
+    fn pause_held_actions(&mut self) {
+        let actions = self
+            .held_actions
+            .iter_mut()
+            .filter(|(_code, tracker)| !tracker.paused)
+            .map(|(code, tracker)| {
+                tracker.paused = true;
+                (*code, tracker.action.clone())
+            })
+            .collect::<Vec<_>>();
+        for (code, action) in actions.into_iter() {
+            debug!("{} (pause mods) -> {}", code, action);
+            action.mods().map(|m| self.mods_up(m));
+        }
+    }
+
+    fn resume_held_actions(&mut self) {
+        let actions = self
+            .held_actions
+            .iter_mut()
+            .filter(|(_code, tracker)| tracker.paused)
+            .map(|(code, tracker)| {
+                tracker.paused = false;
+                (*code, tracker.action.clone())
+            })
+            .collect::<Vec<_>>();
+        for (code, action) in actions.into_iter() {
+            debug!("{} (resume mods) -> {}", code, action);
+            action.mods().map(|m| self.mods_down(m));
+        }
+    }
+
+    fn action_down(&mut self, code: Code, action: Rc<Action>) -> EngineMsg {
+        self.pause_held_actions();
+        debug!("{} (down) -> action {}", code, action);
+        self.held_actions.insert(code, HeldActionTracker::new(action.clone()));
+        let msg = self.action_down_inner(code, action);
+        msg
+    }
+
+    fn action_up(&mut self, code: Code, action: Rc<Action>) {
+        if let Some(prev_action_tracker) = self.held_actions.remove(&code) {
+            let prev_action = prev_action_tracker.action;
+            if prev_action != action {
+                // we've changed layer, release the old action
+                debug!("{} (up) (cleanup) -> action {}", code, prev_action);
+                self.action_up_inner(code, prev_action);
+            }
+        }
+        debug!("{} (up) -> action {}", code, action);
+        self.action_up_inner(code, action);
+        self.resume_held_actions();
     }
 
     fn execute_bind(&mut self, input: &Input, bind: &Bind) -> EngineMsg {
@@ -524,7 +528,7 @@ impl Engine {
                 }
             }
             Bind::Scroll { fwd, bak, rate } => {
-                let scroll_code = self.code_to_scroll(input.code);
+                let scroll_code = input.code.to_scroll_trio();
                 let counter = match scroll_code {
                     Some(Code::Knob) => self.dial_ticks.knob.wrapping_add(1),
                     Some(Code::Scroll) => self.dial_ticks.scroll.wrapping_add(1),
@@ -610,10 +614,10 @@ impl Engine {
                     self.handle_held_code_early(&input);
                     self.handle_repeat_tracker(&input);
                     if let Some(bind) = self.code_to_bind(input.code) {
-                        info!("{} -> {} : {}", input, bind, bind.get_action(input.reverse));
+                        info!("{} -> bind {} -> {}", input, bind, bind.get_action(input.reverse));
                         msg.append(&mut self.execute_bind(&input, bind.as_ref()));
                     } else {
-                        warn!("no binding for code");
+                        info!("no binding for code");
                     }
                     self.handle_held_code_late(&input);
                 }
@@ -639,7 +643,7 @@ impl Engine {
         let menu = self.menu.as_mut().expect("menu should exist");
         match menu.read_action().expect("menu should provide an action") {
             Some(action) => {
-                info!("{} -> {}", Code::Menu, action);
+                info!("{} -> bind {}", Code::Menu, action);
                 msg.append(&mut self.action_down(Code::Menu, action.clone()));
                 self.action_up(Code::Menu, action.clone());
             }
