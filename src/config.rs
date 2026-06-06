@@ -53,46 +53,25 @@ impl fmt::Display for ConfigError {
 // - "ptr_wheel:rev"
 
 lazy_static! {
-    static ref SINGLE_REGEX: Regex = {
+    static ref ACTION_REGEX: Regex = {
         Regex::new(
             r"(?x)
-                ^\s*(?P<action>[[:word:]]+)\s*
-                (?:\(\s*(?P<args>[[:word:]]+\s*(?:,\s*[[:word:]]+\s*)*)\s*\))?
-                \s*(?P<flags>(?::[[:word:]]+\s*)*)$
+                ^\s*(?P<action>[[:word:]-]+)\s*
+                (?:\(\s*(?P<args>[[:word:]-]+\s*(?:,\s*[[:word:]-]+\s*)*)\s*\))?
+                \s*(?P<flags>(?::[[:alpha:]]+\s*)*)
+                (?:(?:\s*/\s*(?P<alt_action>[[:word:]-]+)\s*
+                   (?:\(\s*(?P<alt_args>[[:word:]-]+\s*(?:,\s*[[:word:]-]+\s*)*)\s*\))?)
+                   \s*(?P<alt_flags>(?::[[:alpha:]]+\s*)*))?$
             ",
         )
         .expect("regex should compile")
     };
-    static ref DOUBLE_REGEX: Regex = {
-        Regex::new(
-            r"(?x)
-                ^\s*(?P<action>[[:word:]]+)\s*
-                (?:\(\s*(?P<args>[[:word:]]+\s*(?:,\s*[[:word:]]+\s*)*)\s*\))?
-                (?P<flags>(?::[[:word:]]+\s*)*)
-                (?:\s*/\s*(?P<alt_action>[[:word:]]+)\s*
-                  (?:\(\s*(?P<alt_args>[[:word:]]+\s*(?:,\s*[[:word:]]+\s*)*)\s*\))?
-                )
-                \s*(?P<alt_flags>(?::[[:word:]]+\s*)*)$
-            ",
-        )
-        .expect("regex should compile")
-    };
-    static ref SHORTCUT_REGEX: Regex = {
-        Regex::new(
-            r"(?x)
-                ^\s*(?P<action>[[:word:]]+)\s*
-                (?:\(\s*(?P<args>[[:word:]]+\s*(?:,\s*[[:word:]]+\s*)*)\s*\))?
-                \s*(?P<flags>(?::[[:word:]]+\s*)*)$
-            ",
-        )
-        .expect("regex should compile")
-    };
-    static ref ARGUMENT_REGEX: Regex = Regex::new(r"[[:word:]]+").expect("regex should compile");
-    static ref FLAG_REGEX: Regex = Regex::new(r":[[:word:]]+").expect("regex should compile");
+    static ref ARGUMENT_REGEX: Regex = Regex::new(r"[[:word:]-]+").expect("regex should compile");
+    static ref FLAG_REGEX: Regex = Regex::new(r":[[:alpha:]]+").expect("regex should compile");
     static ref SERIAL_CODE_REGEX: Regex = {
         Regex::new(
             r"(?x)
-                ^\s*(?P<code>[[:word:]]+)\s*x(?P<count>[[:digit:]]+)\s*$
+                ^\s*(?P<code>[[:alpha:]]+)\s*x(?P<count>[[:digit:]]+)\s*$
             ",
         )
         .expect("regex should compile")
@@ -198,9 +177,8 @@ impl<'a> Lookup<'a> {
     }
 
     fn button_bind(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
-        let captures = DOUBLE_REGEX
+        let captures = ACTION_REGEX
             .captures(str)
-            .or_else(|| SINGLE_REGEX.captures(str))
             .ok_or_else(|| ConfigError::new(format!("failed to match button: {}", str)))?;
 
         let action_str = captures.name("action").expect("action name should exist").as_str();
@@ -236,9 +214,8 @@ impl<'a> Lookup<'a> {
     }
 
     fn scroll_bind(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
-        let captures = DOUBLE_REGEX
+        let captures = ACTION_REGEX
             .captures(str)
-            .or_else(|| SINGLE_REGEX.captures(str))
             .ok_or_else(|| ConfigError::new(format!("failed to match scroll: {}", str)))?;
 
         let action_str = captures.name("action").expect("action name should exist").as_str();
@@ -277,8 +254,8 @@ impl<'a> Lookup<'a> {
         Ok(Bind::Scroll { fwd: action.into(), bak: alt_action.into(), rate: rate }.into())
     }
 
-    fn shortcut_bind(&self, str: &str) -> Result<Rc<Action>, ConfigError> {
-        let captures = SHORTCUT_REGEX
+    fn shortcut_bind(&self, str: &str) -> Result<(Rc<Action>, Option<Rc<Action>>), ConfigError> {
+        let captures = ACTION_REGEX
             .captures(str.as_ref())
             .ok_or_else(|| ConfigError::new(format!("failed to match shortcut: {}", str)))?;
 
@@ -287,11 +264,33 @@ impl<'a> Lookup<'a> {
         let flags_str = captures.name("flags").unwrap().as_str();
         let (action, flags) = self.action_and_flags(action_str, args_str, flags_str)?;
 
-        if !flags.is_empty() {
+        let (alt_action, alt_flags) = if captures.name("alt_action").is_some() {
+            let alt_action_str =
+                captures.name("alt_action").expect("action name should exist").as_str();
+            let alt_args_str = captures.name("alt_args").map(|a| a.as_str());
+            let alt_flags_str = captures.name("alt_flags").unwrap().as_str();
+            let (alt_action, alt_flags) =
+                self.action_and_flags(alt_action_str, alt_args_str, alt_flags_str)?;
+
+            (Some(alt_action), alt_flags)
+        } else {
+            (None, vec![])
+        };
+
+        if !flags.is_empty() || !alt_flags.is_empty() {
             return Err(ConfigError::new("shortcut binds accept no other flags".to_owned()));
         }
 
-        Ok(action.into())
+        Ok((action.into(), alt_action.into()))
+    }
+
+    fn shortcut_bind_single(&self, str: &str) -> Result<Rc<Action>, ConfigError> {
+        let (action, alt_action) = self.shortcut_bind(str)?;
+        if alt_action.is_some() {
+            Err(ConfigError::new("expected a single action, not a reversible pair".to_owned()))
+        } else {
+            Ok(action)
+        }
     }
 
     fn custom_bind(
@@ -366,12 +365,12 @@ impl fmt::Display for Bind {
 #[serde(deny_unknown_fields)]
 pub struct Prime<B> {
     pub side: Option<B>,
-    pub side_x2: Option<B>,
     pub top: Option<B>,
-    pub top_x2: Option<B>,
     pub tall: Option<B>,
-    pub tall_x2: Option<B>,
     pub short: Option<B>,
+    pub side_x2: Option<B>,
+    pub top_x2: Option<B>,
+    pub tall_x2: Option<B>,
     pub short_x2: Option<B>,
     pub side_top: Option<B>,
     pub side_tall: Option<B>,
@@ -456,12 +455,12 @@ impl Prime<String> {
 
         Ok(Prime {
             side,
-            side_x2,
             top,
-            top_x2,
             tall,
-            tall_x2,
             short,
+            side_x2,
+            top_x2,
+            tall_x2,
             short_x2,
             side_top,
             side_tall,
@@ -475,15 +474,30 @@ impl Prime<String> {
 
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
-pub struct DPad<B> {
+pub struct Kit<B> {
+    pub tour: Option<B>,
     pub up: Option<B>,
     pub down: Option<B>,
     pub left: Option<B>,
     pub right: Option<B>,
+    pub c1: Option<B>,
+    pub c2: Option<B>,
+    pub side_up: Option<B>,
+    pub side_down: Option<B>,
+    pub side_left: Option<B>,
+    pub side_right: Option<B>,
+    pub top_up: Option<B>,
+    pub top_down: Option<B>,
+    pub top_left: Option<B>,
+    pub top_right: Option<B>,
+    pub tall_c1: Option<B>,
+    pub tall_c2: Option<B>,
+    pub short_c1: Option<B>,
+    pub short_c2: Option<B>,
 }
 
-impl DPad<String> {
-    pub fn actualize(self, lookup: &Lookup) -> Result<DPad<Rc<Bind>>, ConfigError> {
+impl Kit<String> {
+    pub fn actualize(self, lookup: &Lookup) -> Result<Kit<Rc<Bind>>, ConfigError> {
         let up = self
             .up
             .and_then(|s| Some(lookup.button_bind(&s)))
@@ -504,34 +518,47 @@ impl DPad<String> {
             .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("right"))?;
+        let top_up = self
+            .top_up
+            .and_then(|s| Some(lookup.button_bind(&s)))
+            .transpose()
+            .map_err(|e| e.with_path("top_up"))?;
+        let top_down = self
+            .top_down
+            .and_then(|s| Some(lookup.button_bind(&s)))
+            .transpose()
+            .map_err(|e| e.with_path("top_down"))?;
+        let top_left = self
+            .top_left
+            .and_then(|s| Some(lookup.button_bind(&s)))
+            .transpose()
+            .map_err(|e| e.with_path("top_left"))?;
+        let top_right = self
+            .top_right
+            .and_then(|s| Some(lookup.button_bind(&s)))
+            .transpose()
+            .map_err(|e| e.with_path("top_right"))?;
+        let side_up = self
+            .side_up
+            .and_then(|s| Some(lookup.button_bind(&s)))
+            .transpose()
+            .map_err(|e| e.with_path("side_up"))?;
+        let side_down = self
+            .side_down
+            .and_then(|s| Some(lookup.button_bind(&s)))
+            .transpose()
+            .map_err(|e| e.with_path("side_down"))?;
+        let side_left = self
+            .side_left
+            .and_then(|s| Some(lookup.button_bind(&s)))
+            .transpose()
+            .map_err(|e| e.with_path("side_left"))?;
+        let side_right = self
+            .side_right
+            .and_then(|s| Some(lookup.button_bind(&s)))
+            .transpose()
+            .map_err(|e| e.with_path("side_right"))?;
 
-        Ok(DPad { up, down, left, right })
-    }
-}
-
-#[derive(Deserialize, Default, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct Kit<B> {
-    #[serde(default)]
-    pub dpad: DPad<B>,
-    #[serde(default)]
-    pub side_dpad: DPad<B>,
-    #[serde(default)]
-    pub top_dpad: DPad<B>,
-    pub c1: Option<B>,
-    pub c2: Option<B>,
-    pub tall_c1: Option<B>,
-    pub tall_c2: Option<B>,
-    pub short_c1: Option<B>,
-    pub short_c2: Option<B>,
-    pub tour: Option<B>,
-}
-
-impl Kit<String> {
-    pub fn actualize(self, lookup: &Lookup) -> Result<Kit<Rc<Bind>>, ConfigError> {
-        let dpad = self.dpad.actualize(&lookup).map_err(|e| e.with_path("dpad"))?;
-        let side_dpad = self.side_dpad.actualize(&lookup).map_err(|e| e.with_path("side_dpad"))?;
-        let top_dpad = self.top_dpad.actualize(&lookup).map_err(|e| e.with_path("top_dpad"))?;
         let c1 = self
             .c1
             .and_then(|s| Some(lookup.button_bind(&s)))
@@ -562,13 +589,34 @@ impl Kit<String> {
             .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("short_c2"))?;
+
         let tour = self
             .tour
             .and_then(|s| Some(lookup.button_bind(&s)))
             .transpose()
             .map_err(|e| e.with_path("tour"))?;
 
-        Ok(Kit { dpad, side_dpad, top_dpad, c1, c2, tall_c1, tall_c2, short_c1, short_c2, tour })
+        Ok(Kit {
+            up,
+            down,
+            left,
+            right,
+            side_up,
+            side_down,
+            side_left,
+            side_right,
+            top_up,
+            top_down,
+            top_left,
+            top_right,
+            c1,
+            c2,
+            tall_c1,
+            tall_c2,
+            short_c1,
+            short_c2,
+            tour,
+        })
     }
 }
 
@@ -648,6 +696,7 @@ impl Dial<String> {
 pub struct Shortcut<Name, Action> {
     pub name: Name,
     pub action: Action,
+    pub alt_action: Option<Action>,
 }
 
 impl<'de> Deserialize<'de> for Shortcut<Option<String>, String> {
@@ -675,7 +724,7 @@ impl<'de> Deserialize<'de> for Shortcut<Option<String>, String> {
             where
                 E: de::Error,
             {
-                Ok(Shortcut { name: None, action: value.to_owned() })
+                Ok(Shortcut { name: None, action: value.to_owned(), alt_action: None })
             }
 
             fn visit_map<V>(self, mut map: V) -> Result<Self::Value, V::Error>
@@ -702,7 +751,7 @@ impl<'de> Deserialize<'de> for Shortcut<Option<String>, String> {
                 }
                 let name = name.ok_or_else(|| de::Error::missing_field("name"))?;
                 let action = action.ok_or_else(|| de::Error::missing_field("action"))?;
-                Ok(Shortcut { name: name, action: action })
+                Ok(Shortcut { name: name, action: action, alt_action: None })
             }
         }
 
@@ -777,9 +826,9 @@ impl FromStr for Code {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "tall" => Ok(Code::Tall),
             "side" => Ok(Code::Side),
             "top" => Ok(Code::Top),
+            "tall" => Ok(Code::Tall),
             "short" => Ok(Code::Short),
 
             "tour" => Ok(Code::Tour),
@@ -983,7 +1032,7 @@ impl Config {
             Action::PtrButton(_, modifiers) => "[ptr_button]",
             Action::PtrAxis(axis, _, modifiers) => "[ptr_axis]",
             Action::PtrAxisDiscrete(axis, _, _, modifiers) => "[ptr_axis_discrete]",
-            Action::Shortcut(name) => {
+            Action::Shortcut(name, _) => {
                 &self.shortcuts.get(name).expect("shortcut should exist").name
             }
             Action::Macro(name) => &self.macros.get(name).expect("macro should exist").name,
@@ -1000,12 +1049,8 @@ impl TomlConfig {
     pub fn actualize(self, mut library: ActionLibrary) -> Result<Config, ConfigError> {
         let mut lookup = Lookup(&mut library);
 
-        // actions are loaded into the library first, so they can be referenced in mappings
-
-        for (key, _shortcut) in self.shortcuts.iter() {
-            let action = Action::Shortcut(key.clone());
-            lookup.library().insert(key.clone(), action.into());
-        }
+        // most actions are loaded into the library first, so they can be referenced in mappings
+        // we can't do this to shortcuts, because they depend on a lookup
 
         for (key, _macro) in self.macros.iter() {
             let action = Action::Macro(key.clone());
@@ -1034,12 +1079,23 @@ impl TomlConfig {
             .into_iter()
             .map(|(key, c_shortcut)| {
                 let name = c_shortcut.name.unwrap_or_else(|| key.to_title_case());
-                let action =
+                let (action, mut alt_action) =
                     lookup.shortcut_bind(&c_shortcut.action).map_err(|e| e.with_path(&key))?;
-                Ok((key, Shortcut { name: name, action }))
+                if alt_action.is_none()
+                    && let Some(rev) = action.reverse()
+                {
+                    alt_action = Some(rev.into())
+                }
+                Ok((key, Shortcut { name: name, action, alt_action }))
             })
             .collect::<Result<_, _>>()
             .map_err(|e: ConfigError| e.with_path("shortcuts"))?;
+
+        for (key, shortcut) in shortcuts.iter() {
+            let reversible = if shortcut.alt_action.is_some() { Some(false) } else { None };
+            let action = Action::Shortcut(key.clone(), reversible);
+            lookup.library().insert(key.clone(), action.into());
+        }
 
         let macros: HashMap<_, _> = self
             .macros
@@ -1049,7 +1105,7 @@ impl TomlConfig {
                 let actions = c_macro
                     .actions
                     .into_iter()
-                    .map(|a| lookup.shortcut_bind(&a).map_err(|e| e.with_path(&key)))
+                    .map(|a| lookup.shortcut_bind_single(&a).map_err(|e| e.with_path(&key)))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((key, Macro { name: name, actions }))
             })
@@ -1070,7 +1126,7 @@ impl TomlConfig {
                             .enumerate()
                             .map(|(i, action)| {
                                 lookup
-                                    .shortcut_bind(&action)
+                                    .shortcut_bind_single(&action)
                                     .map_err(|e| e.with_path(&i.to_string()))
                             })
                             .collect::<Result<_, _>>()
@@ -1090,7 +1146,7 @@ impl TomlConfig {
                     .entries
                     .clone()
                     .into_iter()
-                    .map(|a| lookup.shortcut_bind(&a).map_err(|e| e.with_path(&key)))
+                    .map(|a| lookup.shortcut_bind_single(&a).map_err(|e| e.with_path(&key)))
                     .collect::<Result<_, _>>()?;
                 let name = c_menu.name.unwrap_or_else(|| key.to_title_case());
                 let menu = Menu {
@@ -1191,28 +1247,28 @@ mod tests {
 
     const CONFIG_1: &'static str = include_str!("test_config_1.toml");
 
-    const BUTTON_BIND_MAX: &str = "a_b_1 (arg_1, arg_2, arg_3) :flag_1 :flag_2 :flag_3";
+    const BUTTON_BIND_MAX: &str = "a_b_1 (arg_1, arg_2, arg_3) :flag :flag :flag";
     const SCROLL_BIND_MAX: &str =
-        "a_b_1 (arg_1, arg_2, 1) / c_d_2 (arg_3, arg_4, 2) :flag_1 :flag_2 :flag_3";
+        "a_b_1 (arg_1, arg_2, 1) / c_d_2 (arg_3, arg_4, 2) :flag :flag :flag";
 
     #[test]
     fn regexes_match_examples() {
-        assert!(SINGLE_REGEX.is_match("a") == true);
-        assert!(SINGLE_REGEX.is_match("a:up:rep") == true);
-        assert!(SINGLE_REGEX.is_match("ptr_x(val):rep") == true);
-        assert!(SINGLE_REGEX.is_match("ptr_x(val):rep") == true);
-        assert!(SINGLE_REGEX.is_match("ptr_wheel") == true);
-        assert!(SINGLE_REGEX.is_match("ptr_wheel:rev") == true);
-        assert!(SINGLE_REGEX.is_match(BUTTON_BIND_MAX) == true);
-        assert!(DOUBLE_REGEX.is_match("a/b") == true);
-        assert!(DOUBLE_REGEX.is_match("a/b:slow") == true);
-        assert!(DOUBLE_REGEX.is_match("a/b:slower") == true);
-        assert!(DOUBLE_REGEX.is_match(SCROLL_BIND_MAX) == true);
+        assert!(ACTION_REGEX.is_match("a") == true);
+        assert!(ACTION_REGEX.is_match("a:up:rep") == true);
+        assert!(ACTION_REGEX.is_match("ptr_x(val):rep") == true);
+        assert!(ACTION_REGEX.is_match("ptr_x(val):rep") == true);
+        assert!(ACTION_REGEX.is_match("ptr_wheel") == true);
+        assert!(ACTION_REGEX.is_match("ptr_wheel:rev") == true);
+        assert!(ACTION_REGEX.is_match(BUTTON_BIND_MAX) == true);
+        assert!(ACTION_REGEX.is_match("a/b") == true);
+        assert!(ACTION_REGEX.is_match("a/b:slow") == true);
+        assert!(ACTION_REGEX.is_match("a/b:slower") == true);
+        assert!(ACTION_REGEX.is_match(SCROLL_BIND_MAX) == true);
     }
 
     #[test]
     fn regexes_return_captures() {
-        let button_match = SINGLE_REGEX.captures(BUTTON_BIND_MAX).expect("match should succeed");
+        let button_match = ACTION_REGEX.captures(BUTTON_BIND_MAX).expect("match should succeed");
         assert_eq!(button_match.name("action").unwrap().as_str(), "a_b_1");
 
         assert!(button_match.name("args").is_some());
@@ -1228,11 +1284,11 @@ mod tests {
         let button_flags_match =
             FLAG_REGEX.find_iter(button_match.name("flags").unwrap().as_str()).collect::<Vec<_>>();
         assert_eq!(button_flags_match.len(), 3);
-        assert_eq!(button_flags_match.get(0).unwrap().as_str(), ":flag_1");
-        assert_eq!(button_flags_match.get(1).unwrap().as_str(), ":flag_2");
-        assert_eq!(button_flags_match.get(2).unwrap().as_str(), ":flag_3");
+        assert_eq!(button_flags_match.get(0).unwrap().as_str(), ":flag");
+        assert_eq!(button_flags_match.get(1).unwrap().as_str(), ":flag");
+        assert_eq!(button_flags_match.get(2).unwrap().as_str(), ":flag");
 
-        let scroll_match = DOUBLE_REGEX.captures(SCROLL_BIND_MAX).expect("match should succeed");
+        let scroll_match = ACTION_REGEX.captures(SCROLL_BIND_MAX).expect("match should succeed");
 
         assert!(scroll_match.name("action").unwrap().as_str() == "a_b_1");
 
@@ -1261,9 +1317,9 @@ mod tests {
             .find_iter(scroll_match.name("alt_flags").unwrap().as_str())
             .collect::<Vec<_>>();
         assert_eq!(scroll_flags_match.len(), 3);
-        assert_eq!(scroll_flags_match.get(0).unwrap().as_str(), ":flag_1");
-        assert_eq!(scroll_flags_match.get(1).unwrap().as_str(), ":flag_2");
-        assert_eq!(scroll_flags_match.get(2).unwrap().as_str(), ":flag_3");
+        assert_eq!(scroll_flags_match.get(0).unwrap().as_str(), ":flag");
+        assert_eq!(scroll_flags_match.get(1).unwrap().as_str(), ":flag");
+        assert_eq!(scroll_flags_match.get(2).unwrap().as_str(), ":flag");
     }
 
     #[test]

@@ -8,8 +8,6 @@ short = "esc"
 tour = "esc"
 c1 = "esc"
 c2 = "esc"
-
-[kit.dpad]
 up = "esc"
 down = "esc"
 left = "esc"

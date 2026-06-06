@@ -109,7 +109,8 @@ pub enum Action {
     PtrButton(u32, Option<Modifiers>),
     PtrAxis(Axis, f64, Option<Modifiers>),
     PtrAxisDiscrete(Axis, f64, i32, Option<Modifiers>),
-    Shortcut(String),
+    // second arg represents whether the shortcut is reversible
+    Shortcut(String, Option<bool>),
     Macro(String),
     MacroGroup(String),
     Menu(String),
@@ -127,6 +128,7 @@ impl Action {
             Action::PtrAxisDiscrete(axis, v, d, mods) => {
                 Some(Action::PtrAxisDiscrete(*axis, -v, -d, mods.clone()))
             }
+            Action::Shortcut(name, Some(rev)) => Some(Action::Shortcut(name.clone(), Some(!rev))),
             _ => None,
         }
     }
@@ -185,7 +187,7 @@ impl fmt::Display for Action {
             Action::PtrButton(btn, mods) => write!(f, "unimpl"),
             Action::PtrAxis(axis, v, mods) => write!(f, "unimpl"),
             Action::PtrAxisDiscrete(axis, v, d, mods) => write!(f, "unimpl"),
-            Action::Shortcut(name) => write!(f, "shortcut {}", name),
+            Action::Shortcut(name, rev) => write!(f, "shortcut {}", name),
             Action::Macro(name) => write!(f, "macro {}", name),
             Action::MacroGroup(name) => write!(f, "macro group {}", name),
             Action::Menu(name) => write!(f, "menu {}", name),

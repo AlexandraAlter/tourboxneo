@@ -223,20 +223,20 @@ impl Engine {
 
             Code::Tour => layer.kit.tour.clone(),
 
-            Code::Up => layer.kit.dpad.up.clone(),
-            Code::Down => layer.kit.dpad.down.clone(),
-            Code::Left => layer.kit.dpad.left.clone(),
-            Code::Right => layer.kit.dpad.right.clone(),
+            Code::Up => layer.kit.up.clone(),
+            Code::Down => layer.kit.down.clone(),
+            Code::Left => layer.kit.left.clone(),
+            Code::Right => layer.kit.right.clone(),
 
-            Code::SideUp => layer.kit.side_dpad.up.clone().or_else(fallback),
-            Code::SideDown => layer.kit.side_dpad.down.clone().or_else(fallback),
-            Code::SideLeft => layer.kit.side_dpad.left.clone().or_else(fallback),
-            Code::SideRight => layer.kit.side_dpad.right.clone().or_else(fallback),
+            Code::SideUp => layer.kit.side_up.clone().or_else(fallback),
+            Code::SideDown => layer.kit.side_down.clone().or_else(fallback),
+            Code::SideLeft => layer.kit.side_left.clone().or_else(fallback),
+            Code::SideRight => layer.kit.side_right.clone().or_else(fallback),
 
-            Code::TopUp => layer.kit.top_dpad.up.clone().or_else(fallback),
-            Code::TopDown => layer.kit.top_dpad.down.clone().or_else(fallback),
-            Code::TopLeft => layer.kit.top_dpad.left.clone().or_else(fallback),
-            Code::TopRight => layer.kit.top_dpad.right.clone().or_else(fallback),
+            Code::TopUp => layer.kit.top_up.clone().or_else(fallback),
+            Code::TopDown => layer.kit.top_down.clone().or_else(fallback),
+            Code::TopLeft => layer.kit.top_left.clone().or_else(fallback),
+            Code::TopRight => layer.kit.top_right.clone().or_else(fallback),
 
             Code::C1 => layer.kit.c1.clone(),
             Code::C2 => layer.kit.c2.clone(),
@@ -341,9 +341,14 @@ impl Engine {
                 self.output.ptr_axis_stop(*axis);
                 self.output.ptr_frame();
             }
-            Action::Shortcut(name) => {
-                let shortcut = self.config.shortcuts.get(name).expect("macro should exist");
-                msg.append(&mut self.action_down_inner(code, shortcut.action.clone()));
+            Action::Shortcut(name, rev) => {
+                let shortcut = self.config.shortcuts.get(name).expect("shortcut should exist");
+                let action = if let Some(true) = rev {
+                    shortcut.alt_action.as_ref().expect("shortcut alt action should exist").clone()
+                } else {
+                    shortcut.action.clone()
+                };
+                msg.append(&mut self.action_down_inner(code, action));
             }
             Action::Macro(name) => {
                 let r#macro = self.config.macros.get(name).expect("macro should exist");
@@ -426,9 +431,14 @@ impl Engine {
             Action::PtrAxisDiscrete(_, _, _, mods) => {
                 mods.as_ref().map(|m| self.mods_up(&m));
             }
-            Action::Shortcut(name) => {
-                let shortcut = self.config.shortcuts.get(name).expect("macro should exist");
-                self.action_up_inner(code, shortcut.action.clone())
+            Action::Shortcut(name, rev) => {
+                let shortcut = self.config.shortcuts.get(name).expect("shortcut should exist");
+                let action = if let Some(true) = rev {
+                    shortcut.alt_action.as_ref().expect("shortcut alt action should exist").clone()
+                } else {
+                    shortcut.action.clone()
+                };
+                self.action_up_inner(code, action);
             }
             Action::Macro(_) => {}
             Action::MacroGroup(_) => {}

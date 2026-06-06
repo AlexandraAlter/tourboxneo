@@ -8,7 +8,6 @@ short = "enter"
 
 [kit]
 
-[kit.dpad]
 up = "up"
 down = "down"
 left = "left"

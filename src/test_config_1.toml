@@ -18,23 +18,20 @@ tall_short = "b"
 
 [kit]
 
-[kit.dpad]
 up = "b"
 down = "b"
 left = "b"
 right = "b"
 
-[kit.side_dpad]
-up = "b"
-down = "b"
-left = "b"
-right = "b"
+side_up = "b"
+side_down = "b"
+side_left = "b"
+side_right = "b"
 
-[kit.top_dpad]
-up = "b"
-down = "b"
-left = "b"
-right = "b"
+top_up = "b"
+top_down = "b"
+top_left = "b"
+top_right = "b"
 
 [knob]
 press = "b"
