@@ -183,11 +183,38 @@ impl fmt::Display for Action {
                 let m = mods.as_ref().unwrap_or(&no_mods);
                 write!(f, "ptr_motion {} {} {}", x, y, m)
             }
-            Action::PtrMotionAbs(x, y, x_ex, y_ex, mods) => write!(f, "unimpl"),
-            Action::PtrButton(btn, mods) => write!(f, "unimpl"),
-            Action::PtrAxis(axis, v, mods) => write!(f, "unimpl"),
-            Action::PtrAxisDiscrete(axis, v, d, mods) => write!(f, "unimpl"),
-            Action::Shortcut(name, rev) => write!(f, "shortcut {}", name),
+            Action::PtrMotionAbs(x, y, x_ex, y_ex, mods) => {
+                let m = mods.as_ref().unwrap_or(&no_mods);
+                write!(f, "ptr motion abs {} {} {} {} {}", x, y, x_ex, y_ex, m)
+            }
+            Action::PtrButton(btn, mods) => {
+                let m = mods.as_ref().unwrap_or(&no_mods);
+                write!(f, "ptr button {} {}", btn, m)
+            }
+            Action::PtrAxis(axis, v, mods) => {
+                let m = mods.as_ref().unwrap_or(&no_mods);
+                let a = match axis {
+                    Axis::VerticalScroll => "vertical",
+                    Axis::HorizontalScroll => "horizontal",
+                };
+                write!(f, "ptr axis {} {} {}", a, v, m)
+            }
+            Action::PtrAxisDiscrete(axis, v, d, mods) => {
+                let m = mods.as_ref().unwrap_or(&no_mods);
+                let a = match axis {
+                    Axis::VerticalScroll => "vertical",
+                    Axis::HorizontalScroll => "horizontal",
+                };
+                write!(f, "ptr axis {} {} {} {}", a, v, d, m)
+            }
+            Action::Shortcut(name, rev) => {
+                let r = match rev {
+                    Some(true) => "reversed",
+                    Some(false) => "",
+                    None => "",
+                };
+                write!(f, "shortcut {} {}", name, r)
+            }
             Action::Macro(name) => write!(f, "macro {}", name),
             Action::MacroGroup(name) => write!(f, "macro group {}", name),
             Action::Menu(name) => write!(f, "menu {}", name),
