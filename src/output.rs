@@ -235,6 +235,11 @@ impl OutputDriver {
         self.update_state();
     }
 
+    pub fn mod_set(&mut self, mkey: ModifierFlags) {
+        self.modifiers = mkey;
+        self.update_state();
+    }
+
     pub fn mods_clear(&mut self) {
         self.modifiers.clear();
         self.update_state();

@@ -2,6 +2,7 @@ mod actions;
 mod config;
 mod engine;
 mod menu;
+mod notify;
 mod output;
 mod serial;
 mod timer;

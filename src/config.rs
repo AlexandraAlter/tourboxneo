@@ -83,6 +83,7 @@ enum Flag {
     Up,
     Repeat,
     Rev,
+    Combi,
     Rate(Rate),
     Mod(Modifiers),
 }
@@ -202,12 +203,14 @@ impl<'a> Lookup<'a> {
             return Ok(Bind::ButtonAB(action.into(), alt_action.into()).into());
         }
 
+        let combi = if flags.contains(&Flag::Combi) { Combi::On } else { Combi::Off };
+
         let bind = if flags.contains(&Flag::Up) {
             Bind::ButtonUp(action.into())
         } else if flags.contains(&Flag::Repeat) {
-            Bind::ButtonRepeat(action.into())
+            Bind::ButtonRepeat(action.into(), combi)
         } else {
-            Bind::Button(action.into())
+            Bind::Button(action.into(), combi)
         };
 
         Ok(bind.into())
@@ -316,11 +319,29 @@ pub enum Rate {
     Slower,
 }
 
+impl Rate {
+    pub fn speed(&self) -> usize {
+        match self {
+            Rate::Normal => 1,
+            Rate::Slow => 2,
+            Rate::Slower => 3,
+        }
+    }
+}
+
+/// Combi::Off means that modifiers are absolute and replace held modifiers
+/// Combi::On means that modifiers stack with held modifiers
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Combi {
+    Off,
+    On,
+}
+
 #[derive(Debug)]
 pub enum Bind {
-    Button(Rc<Action>),
+    Button(Rc<Action>, Combi),
     ButtonUp(Rc<Action>),
-    ButtonRepeat(Rc<Action>),
+    ButtonRepeat(Rc<Action>, Combi),
     ButtonAB(Rc<Action>, Rc<Action>),
     Scroll { fwd: Rc<Action>, bak: Rc<Action>, rate: Rate },
 }
@@ -328,9 +349,9 @@ pub enum Bind {
 impl Bind {
     pub fn get_action(&self, reverse: bool) -> &Action {
         match self {
-            Bind::Button(action) => action,
+            Bind::Button(action, _combi) => action,
             Bind::ButtonUp(action) => action,
-            Bind::ButtonRepeat(action) => action,
+            Bind::ButtonRepeat(action, _combi) => action,
             Bind::ButtonAB(action_a, action_b) => {
                 if reverse {
                     action_a
@@ -352,9 +373,9 @@ impl Bind {
 impl fmt::Display for Bind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Bind::Button(_a) => write!(f, "btn"),
+            Bind::Button(_a, _p) => write!(f, "btn"),
             Bind::ButtonUp(_a) => write!(f, "btnUp"),
-            Bind::ButtonRepeat(_a) => write!(f, "btnRep"),
+            Bind::ButtonRepeat(_a, _p) => write!(f, "btnRep"),
             Bind::ButtonAB(_a, _b) => write!(f, "btn A/B"),
             Bind::Scroll { fwd: _, bak: _, rate } => write!(f, "scroll at {:?}", rate),
         }
@@ -1025,13 +1046,13 @@ impl Config {
     pub fn lookup_name<'a>(&'a self, action: &'a Action) -> &'a str {
         match action {
             Action::None => "None",
-            Action::Mod(modifiers) => "[mod]",
-            Action::Key(key_code, modifiers) => "[key]",
-            Action::PtrMotion(_, _, modifiers) => "[ptr_motion]",
-            Action::PtrMotionAbs(_, _, _, _, modifiers) => "[ptr_motion_abs]",
-            Action::PtrButton(_, modifiers) => "[ptr_button]",
-            Action::PtrAxis(axis, _, modifiers) => "[ptr_axis]",
-            Action::PtrAxisDiscrete(axis, _, _, modifiers) => "[ptr_axis_discrete]",
+            Action::Mod(mods) => "[mod]",
+            Action::Key(key, mods) => "[key]",
+            Action::PtrMotion(_, _, mods) => "[ptr_motion]",
+            Action::PtrMotionAbs(_, _, _, _, mods) => "[ptr_motion_abs]",
+            Action::PtrButton(btn, mods) => "[ptr_button]",
+            Action::PtrAxis(axis, _, mods) => "[ptr_axis]",
+            Action::PtrAxisDiscrete(axis, _, _, mods) => "[ptr_axis_discrete]",
             Action::Shortcut(name, _) => {
                 &self.shortcuts.get(name).expect("shortcut should exist").name
             }

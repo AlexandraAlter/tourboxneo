@@ -25,7 +25,7 @@ impl FuzzelMenu {
             .arg("--hide-prompt")
             .arg("--index")
             .arg("--anchor=".to_owned() + &menu.anchor.to_string())
-            .arg("--mesg=".to_owned() + &menu.message.as_ref().unwrap_or(&"TourBox:".to_string()))
+            .arg("--mesg=".to_owned() + &menu.message.as_ref().unwrap_or_else(|| &menu.name))
             .arg("--select-index=".to_owned() + &menu.select.unwrap_or(0).to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -76,8 +76,6 @@ impl FuzzelMenu {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // #[test]
     // fn test() {
     //     spawn_fuzzel();

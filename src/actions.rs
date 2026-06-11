@@ -181,7 +181,7 @@ impl fmt::Display for Action {
             }
             Action::PtrMotion(x, y, mods) => {
                 let m = mods.as_ref().unwrap_or(&no_mods);
-                write!(f, "ptr_motion {} {} {}", x, y, m)
+                write!(f, "ptr motion {} {} {}", x, y, m)
             }
             Action::PtrMotionAbs(x, y, x_ex, y_ex, mods) => {
                 let m = mods.as_ref().unwrap_or(&no_mods);
