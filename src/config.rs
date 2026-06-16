@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt, fs, hash::Hash, path::PathBuf, rc::Rc, str::FromStr};
 
 use heck::ToTitleCase;
-use log::info;
+use log::{error, info};
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -11,17 +11,44 @@ use serde::{
 };
 
 use crate::{
-    actions::{Action, ActionLibrary, Modifiers},
+    actions::{Action, ActionLibrary, Bind, Combi, Modifiers, Rate},
     serial::{Code, CodeCategory},
 };
 
 #[derive(Debug, Clone)]
-pub struct ConfigError {
+pub enum ConfigError {
+    Toml(toml::de::Error),
+    Parse(ConfigParseError),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ConfigError::Toml(error) => write!(f, "{error}"),
+            ConfigError::Parse(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl From<toml::de::Error> for ConfigError {
+    fn from(value: toml::de::Error) -> Self {
+        ConfigError::Toml(value)
+    }
+}
+
+impl From<ConfigParseError> for ConfigError {
+    fn from(value: ConfigParseError) -> Self {
+        ConfigError::Parse(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigParseError {
     msg: String,
     path: Vec<String>,
 }
 
-impl ConfigError {
+impl ConfigParseError {
     pub fn new(msg: String) -> Self {
         Self { msg: msg, path: Vec::new() }
     }
@@ -36,7 +63,7 @@ impl ConfigError {
     }
 }
 
-impl fmt::Display for ConfigError {
+impl fmt::Display for ConfigParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Config error at {}: {}", self.path_or_dot(), self.msg)
     }
@@ -91,10 +118,10 @@ enum Flag {
 pub struct Lookup<'a>(&'a mut ActionLibrary);
 
 impl<'a> Lookup<'a> {
-    fn action(&self, str: &str, args: Option<Vec<String>>) -> Result<Rc<Action>, ConfigError> {
+    fn action(&self, str: &str, args: Option<Vec<String>>) -> Result<Rc<Action>, ConfigParseError> {
         self.0
             .get(str.as_ref(), &args)
-            .ok_or_else(|| ConfigError::new(format!("action not found in library: {}", str)))
+            .ok_or_else(|| ConfigParseError::new(format!("action not found in library: {}", str)))
     }
 
     fn args(&self, args: Option<&str>) -> Option<Vec<String>> {
@@ -106,7 +133,7 @@ impl<'a> Lookup<'a> {
         }
     }
 
-    fn flags(&self, flags: &str) -> Result<Vec<Flag>, ConfigError> {
+    fn flags(&self, flags: &str) -> Result<Vec<Flag>, ConfigParseError> {
         let flag_vec = FLAG_REGEX
             .find_iter(flags)
             .map(|f| match f.as_str().strip_prefix(":").unwrap() {
@@ -120,11 +147,11 @@ impl<'a> Lookup<'a> {
             .collect::<Vec<_>>();
         if flag_vec.contains(&None) {
             // TODO: pass the exact flag in
-            return Err(ConfigError::new(format!("unrecogized flag: {}", flags)));
+            return Err(ConfigParseError::new(format!("unrecogized flag: {}", flags)));
         }
         let flag_vec: Vec<_> = flag_vec.iter().flatten().cloned().collect();
         if flag_vec.iter().filter(|f| vec![Flag::Up, Flag::Repeat].contains(*f)).count() > 1 {
-            return Err(ConfigError::new("multiple mode-setting flags".to_owned()));
+            return Err(ConfigParseError::new("multiple mode-setting flags".to_owned()));
         }
         if flag_vec
             .iter()
@@ -132,7 +159,7 @@ impl<'a> Lookup<'a> {
             .count()
             > 1
         {
-            return Err(ConfigError::new("multiple rate flags".to_owned()));
+            return Err(ConfigParseError::new("multiple rate flags".to_owned()));
         }
         Ok(flag_vec)
     }
@@ -142,7 +169,7 @@ impl<'a> Lookup<'a> {
         action_str: &str,
         args_str: Option<&str>,
         flags_str: &str,
-    ) -> Result<(Rc<Action>, Vec<Flag>), ConfigError> {
+    ) -> Result<(Rc<Action>, Vec<Flag>), ConfigParseError> {
         let args = self.args(args_str);
         let mut action = self.action(action_str, args)?;
         let flags = self.flags(flags_str)?;
@@ -156,7 +183,10 @@ impl<'a> Lookup<'a> {
                     action = action
                         .reverse()
                         .ok_or_else(|| {
-                            ConfigError::new(format!("action is not reversible: {}", action_str))
+                            ConfigParseError::new(format!(
+                                "action is not reversible: {}",
+                                action_str
+                            ))
                         })?
                         .into()
                 }
@@ -169,7 +199,7 @@ impl<'a> Lookup<'a> {
             action = action
                 .with_modifiers(&modifiers)
                 .ok_or_else(|| {
-                    ConfigError::new(format!("action cannot be modified: {}", action_str))
+                    ConfigParseError::new(format!("action cannot be modified: {}", action_str))
                 })?
                 .into()
         }
@@ -177,10 +207,10 @@ impl<'a> Lookup<'a> {
         Ok((action, non_mods_flags))
     }
 
-    fn button_bind(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
+    fn button_bind(&self, str: &str) -> Result<Rc<Bind>, ConfigParseError> {
         let captures = ACTION_REGEX
             .captures(str)
-            .ok_or_else(|| ConfigError::new(format!("failed to match button: {}", str)))?;
+            .ok_or_else(|| ConfigParseError::new(format!("failed to match button: {}", str)))?;
 
         let action_str = captures.name("action").expect("action name should exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
@@ -197,7 +227,7 @@ impl<'a> Lookup<'a> {
                 self.action_and_flags(alt_action_str, alt_args_str, alt_flags_str)?;
 
             if !alt_flags.is_empty() {
-                return Err(ConfigError::new("AB binds accept no other flags".to_owned()));
+                return Err(ConfigParseError::new("AB binds accept no other flags".to_owned()));
             }
 
             return Ok(Bind::ButtonAB(action.into(), alt_action.into()).into());
@@ -216,10 +246,10 @@ impl<'a> Lookup<'a> {
         Ok(bind.into())
     }
 
-    fn scroll_bind(&self, str: &str) -> Result<Rc<Bind>, ConfigError> {
+    fn scroll_bind(&self, str: &str) -> Result<Rc<Bind>, ConfigParseError> {
         let captures = ACTION_REGEX
             .captures(str)
-            .ok_or_else(|| ConfigError::new(format!("failed to match scroll: {}", str)))?;
+            .ok_or_else(|| ConfigParseError::new(format!("failed to match scroll: {}", str)))?;
 
         let action_str = captures.name("action").expect("action name should exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
@@ -239,7 +269,7 @@ impl<'a> Lookup<'a> {
             let reversed = action
                 .reverse()
                 .ok_or_else(|| {
-                    ConfigError::new(format!("action is not reversible: {}", action_str))
+                    ConfigParseError::new(format!("action is not reversible: {}", action_str))
                 })?
                 .into();
             (reversed, vec![])
@@ -249,18 +279,22 @@ impl<'a> Lookup<'a> {
         for f in flags.iter().chain(alt_flags.iter()) {
             match f {
                 Flag::Rate(r) => rate = *r,
-                // TODO make this not panic
-                _ => panic!("unrecognised flag: {:?}", f),
+                _ => {
+                    return Err(ConfigParseError::new(format!("unrecognized flag: {:?}", f)));
+                }
             }
         }
 
         Ok(Bind::Scroll { fwd: action.into(), bak: alt_action.into(), rate: rate }.into())
     }
 
-    fn shortcut_bind(&self, str: &str) -> Result<(Rc<Action>, Option<Rc<Action>>), ConfigError> {
+    fn shortcut_bind(
+        &self,
+        str: &str,
+    ) -> Result<(Rc<Action>, Option<Rc<Action>>), ConfigParseError> {
         let captures = ACTION_REGEX
             .captures(str.as_ref())
-            .ok_or_else(|| ConfigError::new(format!("failed to match shortcut: {}", str)))?;
+            .ok_or_else(|| ConfigParseError::new(format!("failed to match shortcut: {}", str)))?;
 
         let action_str = captures.name("action").expect("action name should exist").as_str();
         let args_str = captures.name("args").map(|a| a.as_str());
@@ -281,16 +315,16 @@ impl<'a> Lookup<'a> {
         };
 
         if !flags.is_empty() || !alt_flags.is_empty() {
-            return Err(ConfigError::new("shortcut binds accept no other flags".to_owned()));
+            return Err(ConfigParseError::new("shortcut binds accept no other flags".to_owned()));
         }
 
         Ok((action.into(), alt_action.into()))
     }
 
-    fn shortcut_bind_single(&self, str: &str) -> Result<Rc<Action>, ConfigError> {
+    fn shortcut_bind_single(&self, str: &str) -> Result<Rc<Action>, ConfigParseError> {
         let (action, alt_action) = self.shortcut_bind(str)?;
         if alt_action.is_some() {
-            Err(ConfigError::new("expected a single action, not a reversible pair".to_owned()))
+            Err(ConfigParseError::new("expected a single action, not a reversible pair".to_owned()))
         } else {
             Ok(action)
         }
@@ -300,8 +334,8 @@ impl<'a> Lookup<'a> {
         &self,
         code_str: &str,
         bind_str: &str,
-    ) -> Result<(CustomCode, Rc<Bind>), ConfigError> {
-        let code = CustomCode::from_str(code_str)?;
+    ) -> Result<(Rc<CustomCode>, Rc<Bind>), ConfigParseError> {
+        let code = Rc::new(CustomCode::from_str(code_str)?);
         let bind =
             if code.is_scroll() { self.scroll_bind(bind_str) } else { self.button_bind(bind_str) };
         Ok((code, bind.map_err(|e| e.with_path(code_str))?))
@@ -309,76 +343,6 @@ impl<'a> Lookup<'a> {
 
     fn library(&mut self) -> &mut ActionLibrary {
         self.0
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Rate {
-    Normal,
-    Slow,
-    Slower,
-}
-
-impl Rate {
-    pub fn speed(&self) -> usize {
-        match self {
-            Rate::Normal => 1,
-            Rate::Slow => 2,
-            Rate::Slower => 3,
-        }
-    }
-}
-
-/// Combi::Off means that modifiers are absolute and replace held modifiers
-/// Combi::On means that modifiers stack with held modifiers
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Combi {
-    Off,
-    On,
-}
-
-#[derive(Debug)]
-pub enum Bind {
-    Button(Rc<Action>, Combi),
-    ButtonUp(Rc<Action>),
-    ButtonRepeat(Rc<Action>, Combi),
-    ButtonAB(Rc<Action>, Rc<Action>),
-    Scroll { fwd: Rc<Action>, bak: Rc<Action>, rate: Rate },
-}
-
-impl Bind {
-    pub fn get_action(&self, reverse: bool) -> &Action {
-        match self {
-            Bind::Button(action, _combi) => action,
-            Bind::ButtonUp(action) => action,
-            Bind::ButtonRepeat(action, _combi) => action,
-            Bind::ButtonAB(action_a, action_b) => {
-                if reverse {
-                    action_a
-                } else {
-                    action_b
-                }
-            }
-            Bind::Scroll { fwd, bak, rate: _ } => {
-                if reverse {
-                    fwd
-                } else {
-                    bak
-                }
-            }
-        }
-    }
-}
-
-impl fmt::Display for Bind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Bind::Button(_a, _p) => write!(f, "btn"),
-            Bind::ButtonUp(_a) => write!(f, "btnUp"),
-            Bind::ButtonRepeat(_a, _p) => write!(f, "btnRep"),
-            Bind::ButtonAB(_a, _b) => write!(f, "btn A/B"),
-            Bind::Scroll { fwd: _, bak: _, rate } => write!(f, "scroll at {:?}", rate),
-        }
     }
 }
 
@@ -402,7 +366,7 @@ pub struct Prime<B> {
 }
 
 impl Prime<String> {
-    pub fn actualize(self, lookup: &Lookup) -> Result<Prime<Rc<Bind>>, ConfigError> {
+    pub fn actualize(self, lookup: &Lookup) -> Result<Prime<Rc<Bind>>, ConfigParseError> {
         let side = self
             .side
             .and_then(|s| Some(lookup.button_bind(&s)))
@@ -518,7 +482,7 @@ pub struct Kit<B> {
 }
 
 impl Kit<String> {
-    pub fn actualize(self, lookup: &Lookup) -> Result<Kit<Rc<Bind>>, ConfigError> {
+    pub fn actualize(self, lookup: &Lookup) -> Result<Kit<Rc<Bind>>, ConfigParseError> {
         let up = self
             .up
             .and_then(|s| Some(lookup.button_bind(&s)))
@@ -653,7 +617,7 @@ pub struct Knob<B> {
 }
 
 impl Knob<String> {
-    pub fn actualize(self, lookup: &Lookup) -> Result<Knob<Rc<Bind>>, ConfigError> {
+    pub fn actualize(self, lookup: &Lookup) -> Result<Knob<Rc<Bind>>, ConfigParseError> {
         let press = self
             .press
             .and_then(|s| Some(lookup.button_bind(&s)))
@@ -697,7 +661,7 @@ pub struct Dial<B> {
 }
 
 impl Dial<String> {
-    pub fn actualize(self, lookup: &Lookup) -> Result<Dial<Rc<Bind>>, ConfigError> {
+    pub fn actualize(self, lookup: &Lookup) -> Result<Dial<Rc<Bind>>, ConfigParseError> {
         let press = self
             .press
             .and_then(|s| Some(lookup.button_bind(&s)))
@@ -843,7 +807,7 @@ pub struct Menu<Name, Action> {
 
 // only used for custom codes, so we only cover the base keys
 impl FromStr for Code {
-    type Err = ConfigError;
+    type Err = ConfigParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
@@ -871,7 +835,7 @@ impl FromStr for Code {
             "dial_down" => Ok(Code::DialButton),
             "dial" => Ok(Code::Dial),
 
-            _ => Err(ConfigError::new(format!("invalid custom code {}", s))),
+            _ => Err(ConfigParseError::new(format!("invalid custom code {}", s))),
         }
     }
 }
@@ -895,8 +859,19 @@ impl CustomCode {
     }
 }
 
+impl fmt::Display for CustomCode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            CustomCode::Series(code, count) => write!(f, "{code}x{count}"),
+            CustomCode::Parallel(codes) => {
+                write!(f, "{}", codes.iter().map(|c| c.to_string()).collect::<Vec<_>>().join("+"))
+            }
+        }
+    }
+}
+
 impl FromStr for CustomCode {
-    type Err = ConfigError;
+    type Err = ConfigParseError;
 
     fn from_str(str: &str) -> Result<Self, Self::Err> {
         match SERIAL_CODE_REGEX.captures(str.as_ref()) {
@@ -905,7 +880,10 @@ impl FromStr for CustomCode {
                 let code = Code::from_str(code_str)?;
                 let count_str = captures.name("count").expect("count should be present").as_str();
                 let count = usize::from_str(count_str).map_err(|_e| {
-                    ConfigError::new(format!("unable to parse custom code's count: {}", count_str))
+                    ConfigParseError::new(format!(
+                        "unable to parse custom code's count: {}",
+                        count_str
+                    ))
                 })?;
                 Ok(CustomCode::Series(code, count))
             }
@@ -913,16 +891,16 @@ impl FromStr for CustomCode {
                 let mut components =
                     str.split("+")
                         .map(|c| Code::from_str(c))
-                        .collect::<Result<Vec<_>, ConfigError>>()?;
+                        .collect::<Result<Vec<_>, ConfigParseError>>()?;
                 components.sort();
                 if Code::is_impossible_combo(&components) {
-                    return Err(ConfigError::new(format!(
+                    return Err(ConfigParseError::new(format!(
                         "custom code is impossible to input: {}",
                         str
                     )));
                 }
                 if Code::is_builtin_combo(&components) {
-                    return Err(ConfigError::new(format!(
+                    return Err(ConfigParseError::new(format!(
                         "custom code overlaps a built-in code: {}",
                         str
                     )));
@@ -959,7 +937,7 @@ impl Layer<(), String, String> {
     pub fn actualize(
         self,
         lookup: &Lookup,
-    ) -> Result<Layer<(), CustomCode, Rc<Bind>>, ConfigError> {
+    ) -> Result<Layer<(), Rc<CustomCode>, Rc<Bind>>, ConfigParseError> {
         let prime = self.prime.actualize(&lookup).map_err(|e| e.with_path("prime"))?;
         let kit = self.kit.actualize(&lookup).map_err(|e| e.with_path("kit"))?;
         let knob = self.knob.actualize(&lookup).map_err(|e| e.with_path("knob"))?;
@@ -969,7 +947,7 @@ impl Layer<(), String, String> {
             .custom
             .into_iter()
             .map(|(k, v)| lookup.custom_bind(&k, &v))
-            .collect::<Result<HashMap<_, _>, ConfigError>>()
+            .collect::<Result<HashMap<_, _>, ConfigParseError>>()
             .map_err(|e| e.with_path("custom"))?;
 
         Ok(Layer { name: (), prime, kit, knob, scroll, dial, custom })
@@ -981,7 +959,7 @@ impl Layer<Option<String>, String, String> {
         self,
         key: &str,
         lookup: &Lookup,
-    ) -> Result<Layer<String, CustomCode, Rc<Bind>>, ConfigError> {
+    ) -> Result<Layer<String, Rc<CustomCode>, Rc<Bind>>, ConfigParseError> {
         let name = self.name.unwrap_or_else(|| key.to_title_case());
         let prime = self.prime.actualize(&lookup).map_err(|e| e.with_path("prime"))?;
         let kit = self.kit.actualize(&lookup).map_err(|e| e.with_path("kit"))?;
@@ -992,7 +970,7 @@ impl Layer<Option<String>, String, String> {
             .custom
             .into_iter()
             .map(|(k, v)| lookup.custom_bind(&k, &v))
-            .collect::<Result<HashMap<_, _>, ConfigError>>()
+            .collect::<Result<HashMap<_, _>, ConfigParseError>>()
             .map_err(|e| e.with_path("custom"))?;
 
         Ok(Layer { name, prime, kit, knob, scroll, dial, custom })
@@ -1004,6 +982,7 @@ impl Layer<Option<String>, String, String> {
 #[serde(deny_unknown_fields)]
 pub struct TomlConfig {
     pub name: String,
+    pub default_layer: Option<String>,
     #[serde(flatten)]
     pub base: Layer<(), String, String>,
     #[serde(default = "HashMap::new")]
@@ -1022,8 +1001,9 @@ pub struct TomlConfig {
 #[derive(Debug)]
 pub struct Config {
     pub name: String,
-    pub base: Layer<(), CustomCode, Rc<Bind>>,
-    pub layers: HashMap<String, Layer<String, CustomCode, Rc<Bind>>>,
+    pub default_layer: Option<String>,
+    pub base: Layer<(), Rc<CustomCode>, Rc<Bind>>,
+    pub layers: HashMap<String, Layer<String, Rc<CustomCode>, Rc<Bind>>>,
     pub shortcuts: HashMap<String, Shortcut<String, Rc<Action>>>,
     pub macros: HashMap<String, Macro<String, Rc<Action>>>,
     pub macro_groups: HashMap<String, MacroGroup<String, Rc<Action>>>,
@@ -1035,7 +1015,7 @@ pub static MENU_LAYER_TOML: &'static str = include_str!("menu_layer.toml");
 
 pub fn generate_menu_layer(
     lookup: &Lookup,
-) -> Result<Layer<String, CustomCode, Rc<Bind>>, ConfigError> {
+) -> Result<Layer<String, Rc<CustomCode>, Rc<Bind>>, ConfigParseError> {
     toml::from_str::<Layer<Option<String>, String, String>>(MENU_LAYER_TOML)
         .expect("menu layer toml should parse")
         .actualize("menu", lookup)
@@ -1067,7 +1047,7 @@ impl Config {
 }
 
 impl TomlConfig {
-    pub fn actualize(self, mut library: ActionLibrary) -> Result<Config, ConfigError> {
+    pub fn actualize(self, mut library: ActionLibrary) -> Result<Config, ConfigParseError> {
         let mut lookup = Lookup(&mut library);
 
         // most actions are loaded into the library first, so they can be referenced in mappings
@@ -1110,7 +1090,7 @@ impl TomlConfig {
                 Ok((key, Shortcut { name: name, action, alt_action }))
             })
             .collect::<Result<_, _>>()
-            .map_err(|e: ConfigError| e.with_path("shortcuts"))?;
+            .map_err(|e: ConfigParseError| e.with_path("shortcuts"))?;
 
         for (key, shortcut) in shortcuts.iter() {
             let reversible = if shortcut.alt_action.is_some() { Some(false) } else { None };
@@ -1131,7 +1111,7 @@ impl TomlConfig {
                 Ok((key, Macro { name: name, actions }))
             })
             .collect::<Result<_, _>>()
-            .map_err(|e: ConfigError| e.with_path("macros"))?;
+            .map_err(|e: ConfigParseError| e.with_path("macros"))?;
 
         let macro_groups: HashMap<_, _> = self
             .macro_groups
@@ -1157,7 +1137,7 @@ impl TomlConfig {
                 Ok((key, MacroGroup { name: name, reverse: c_macro_group.reverse, groups }))
             })
             .collect::<Result<_, _>>()
-            .map_err(|e: ConfigError| e.with_path("macro_groups"))?;
+            .map_err(|e: ConfigParseError| e.with_path("macro_groups"))?;
 
         let menus: HashMap<_, _> = self
             .menus
@@ -1180,7 +1160,7 @@ impl TomlConfig {
                 Ok((key, menu.into()))
             })
             .collect::<Result<_, _>>()
-            .map_err(|e: ConfigError| e.with_path("menus"))?;
+            .map_err(|e: ConfigParseError| e.with_path("menus"))?;
 
         let base = self.base.actualize(&lookup)?;
 
@@ -1194,15 +1174,22 @@ impl TomlConfig {
                 layer.actualize(&key, &lookup).map(|l| (key.to_string(), l))
             })
             .collect::<Result<HashMap<_, _>, _>>()
-            .map_err(|e: ConfigError| e.with_path("layers"))?;
+            .map_err(|e: ConfigParseError| e.with_path("layers"))?;
 
         if !layers.contains_key("menu") {
             let menu_layer = generate_menu_layer(&lookup)?;
             layers.extend(HashMap::from([("menu".to_string(), menu_layer)]));
         }
 
+        if let Some(ref d) = self.default_layer
+            && let None = layers.get(d)
+        {
+            return Err(ConfigParseError::new(format!("default layer does not exist: {}", d)));
+        }
+
         Ok(Config {
             name: self.name,
+            default_layer: self.default_layer,
             base: base,
             layers: layers,
             shortcuts,
@@ -1217,7 +1204,7 @@ impl TomlConfig {
 pub struct ConfigManager {
     default_library: Rc<ActionLibrary>,
     default_config: Rc<Config>,
-    configs: Vec<Rc<Config>>,
+    configs: HashMap<PathBuf, Rc<Config>>,
 }
 
 impl ConfigManager {
@@ -1228,20 +1215,34 @@ impl ConfigManager {
         ConfigManager {
             default_library: default_library,
             default_config: Rc::new(default_config),
-            configs: Vec::new(),
+            configs: HashMap::new(),
         }
     }
 
-    pub fn load_config(&mut self, path: PathBuf) -> String {
+    pub fn load_config(&mut self, path: &PathBuf) -> Result<String, ConfigError> {
+        let config = self.actualize_config(path)?;
+        let name = config.name.clone();
+        let old_config = self.configs.insert(path.clone(), Rc::new(config));
+        match old_config {
+            Some(c) => {
+                info!("reloaded config {}", name);
+                if c.name != name {
+                    error!("replaced config changed name");
+                }
+            }
+            None => {
+                info!("loaded config {}", name);
+            }
+        }
+        Ok(name)
+    }
+
+    fn actualize_config(&self, path: &PathBuf) -> Result<Config, ConfigError> {
         let library = ActionLibrary::new(Some(self.default_library.clone()));
         let str = fs::read_to_string(path).expect("config should be readable");
-        let config = toml::from_str::<TomlConfig>(&str)
-            .expect("config should load")
-            .actualize(library)
-            .unwrap();
-        let name = config.name.clone();
-        self.configs.push(Rc::new(config));
-        name
+        let str_config = toml::from_str::<TomlConfig>(&str)?;
+        let config = str_config.actualize(library)?;
+        Ok(config)
     }
 
     pub fn get_default_config(&self) -> Rc<Config> {
@@ -1249,7 +1250,7 @@ impl ConfigManager {
     }
 
     pub fn get_config(&self, name: &str) -> Option<Rc<Config>> {
-        self.configs.iter().find(|c| c.name.eq(name)).map(|c| c.clone())
+        self.configs.values().find(|c| c.name.eq(name)).map(|c| c.clone())
     }
 
     fn load_default_config(library: Rc<ActionLibrary>) -> Config {

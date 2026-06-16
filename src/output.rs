@@ -1,6 +1,6 @@
 /// Substantially copied from https://github.com/ptazithos/wkeys/tree/main/wkeys/src/native
 use bitflags::Flags;
-use log::warn;
+use log::{debug, warn};
 
 use std::time::SystemTime;
 use std::{fs::File, io::Write, os::fd::AsFd, path::PathBuf};
@@ -165,6 +165,7 @@ pub struct OutputDriver {
     latches: ModifierFlags,
     locks: ModifierFlags,
     start_time: SystemTime,
+    held_keys: Vec<evdev::KeyCode>,
 }
 
 impl OutputDriver {
@@ -197,6 +198,7 @@ impl OutputDriver {
             latches: ModifierFlags::empty(),
             locks: ModifierFlags::empty(),
             start_time: SystemTime::now(),
+            held_keys: Vec::new(),
         }
     }
 
@@ -204,8 +206,22 @@ impl OutputDriver {
         self.start_time.elapsed().unwrap().as_millis() as u32
     }
 
+    pub fn cleanse(&mut self) {
+        debug!(target: "output", "cleansing outputdriver");
+        self.keys_clear();
+        self.mods_clear();
+        self.latches_clear();
+        self.locks_clear();
+    }
+
+    pub fn held_keys_count(&self) -> usize {
+        self.held_keys.len()
+    }
+
     pub fn key_press(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
+            debug!(target: "output", "key press {key:?}");
+            self.held_keys.push(key);
             keyboard.key(self.get_cur_ms(), key.code().into(), KeyState::Pressed.into());
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
@@ -213,6 +229,7 @@ impl OutputDriver {
 
     pub fn key_repeat(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
+            debug!(target: "output", "key repeat {key:?}");
             keyboard.key(self.get_cur_ms(), key.code().into(), KeyState::Repeated.into());
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
@@ -220,57 +237,80 @@ impl OutputDriver {
 
     pub fn key_release(&mut self, key: evdev::KeyCode) {
         if let Some(keyboard) = &self.session_state.keyboard {
+            debug!(target: "output", "key release {key:?}");
+            self.held_keys.retain(|k| *k != key);
             keyboard.key(self.get_cur_ms(), key.code().into(), KeyState::Released.into());
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
     }
 
+    pub fn keys_clear(&mut self) {
+        if let Some(keyboard) = &self.session_state.keyboard {
+            debug!(target: "output", "keys clear");
+            for key in self.held_keys.iter() {
+                keyboard.key(self.get_cur_ms(), key.code().into(), KeyState::Released.into());
+            }
+            self.held_keys.clear();
+            self.event_queue.roundtrip(&mut self.session_state).unwrap();
+        }
+    }
+
     pub fn mod_append(&mut self, mkey: ModifierFlags) {
+        debug!(target: "output", "mod append {mkey:?}");
         self.modifiers.insert(mkey);
         self.update_state();
     }
 
     pub fn mod_remove(&mut self, mkey: ModifierFlags) {
+        debug!(target: "output", "mod remove {mkey:?}");
         self.modifiers.remove(mkey);
         self.update_state();
     }
 
     pub fn mod_set(&mut self, mkey: ModifierFlags) {
+        debug!(target: "output", "mod set {mkey:?}");
         self.modifiers = mkey;
         self.update_state();
     }
 
     pub fn mods_clear(&mut self) {
+        debug!(target: "output", "mod clear");
         self.modifiers.clear();
         self.update_state();
     }
 
-    pub fn latch_append(&mut self, mkey: ModifierFlags) {
-        self.latches.insert(mkey);
+    pub fn latch_append(&mut self, lkey: ModifierFlags) {
+        debug!(target: "output", "latch append {lkey:?}");
+        self.latches.insert(lkey);
         self.update_state();
     }
 
-    pub fn latch_remove(&mut self, mkey: ModifierFlags) {
-        self.latches.remove(mkey);
+    pub fn latch_remove(&mut self, lkey: ModifierFlags) {
+        debug!(target: "output", "latch remove {lkey:?}");
+        self.latches.remove(lkey);
         self.update_state();
     }
 
     pub fn latches_clear(&mut self) {
+        debug!(target: "output", "latches clear");
         self.latches.clear();
         self.update_state();
     }
 
     pub fn lock_append(&mut self, lkey: ModifierFlags) {
+        debug!(target: "output", "lock append {lkey:?}");
         self.locks.insert(lkey);
         self.update_state();
     }
 
     pub fn lock_remove(&mut self, lkey: ModifierFlags) {
+        debug!(target: "output", "lock remove {lkey:?}");
         self.locks.remove(lkey);
         self.update_state();
     }
 
     pub fn locks_clear(&mut self) {
+        debug!(target: "output", "locks clear");
         self.locks.clear();
         self.update_state();
     }
@@ -284,6 +324,7 @@ impl OutputDriver {
 
     pub fn ptr_motion(&mut self, dx: f64, dy: f64) {
         if let Some(pointer) = &self.session_state.pointer {
+            debug!(target: "output", "ptr motion {dx} {dy}");
             pointer.motion(self.get_cur_ms(), dx, dy);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
@@ -291,6 +332,7 @@ impl OutputDriver {
 
     pub fn ptr_motion_absolute(&mut self, x: u32, y: u32, x_extent: u32, y_extent: u32) {
         if let Some(pointer) = &self.session_state.pointer {
+            debug!(target: "output", "ptr motion abs {x} {y} {x_extent} {y_extent}");
             pointer.motion_absolute(self.get_cur_ms(), x, y, x_extent, y_extent);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
@@ -298,6 +340,7 @@ impl OutputDriver {
 
     pub fn ptr_button(&mut self, button: u32, released: bool) {
         if let Some(pointer) = &self.session_state.pointer {
+            debug!(target: "output", "ptr button {button} {released}");
             let state = if released { ButtonState::Released } else { ButtonState::Pressed };
             pointer.button(self.get_cur_ms(), button, state);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
@@ -306,6 +349,7 @@ impl OutputDriver {
 
     pub fn ptr_axis(&mut self, axis: Axis, value: f64) {
         if let Some(pointer) = &self.session_state.pointer {
+            debug!(target: "output", "ptr axis {axis:?} {value}");
             pointer.axis(self.get_cur_ms(), axis.into(), value);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
@@ -313,6 +357,7 @@ impl OutputDriver {
 
     pub fn ptr_frame(&mut self) {
         if let Some(pointer) = &self.session_state.pointer {
+            debug!(target: "output", "ptr frame");
             pointer.frame();
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
@@ -320,6 +365,7 @@ impl OutputDriver {
 
     pub fn ptr_axis_source(&mut self, axis_source: AxisSource) {
         if let Some(pointer) = &self.session_state.pointer {
+            debug!(target: "output", "ptr axis source {axis_source:?}");
             pointer.axis_source(axis_source);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
@@ -327,6 +373,7 @@ impl OutputDriver {
 
     pub fn ptr_axis_stop(&mut self, axis: Axis) {
         if let Some(pointer) = &self.session_state.pointer {
+            debug!(target: "output", "ptr axis stop");
             pointer.axis_stop(self.get_cur_ms(), axis.into());
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }
@@ -334,6 +381,7 @@ impl OutputDriver {
 
     pub fn ptr_axis_discrete(&mut self, axis: Axis, value: f64, discrete: i32) {
         if let Some(pointer) = &self.session_state.pointer {
+            debug!(target: "output", "ptr axis discrete {axis:?} {value} {discrete}");
             pointer.axis_discrete(self.get_cur_ms(), axis.into(), value, discrete);
             self.event_queue.roundtrip(&mut self.session_state).unwrap();
         }

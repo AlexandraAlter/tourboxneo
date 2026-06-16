@@ -96,13 +96,6 @@ pub enum Code {
 
     DialButton = 0x38,
     Dial = 0x0f,
-
-    /// Dummy value used in `Engine` for ongoing macro invocations
-    Macro = 0xfd,
-    /// Dummy value used in `Engine` for ongoing menu invocations
-    Menu = 0xfe,
-    /// Dummy value used in `Engine` for invalid values
-    None = 0xff,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -114,7 +107,6 @@ pub enum CodeCategory {
     ScrollPress,
     Combo,
     Other,
-    Dummy,
 }
 
 impl Code {
@@ -127,8 +119,36 @@ impl Code {
             Code::C1 | Code::C2 => CodeCategory::C,
             Code::Knob | Code::Scroll | Code::Dial => CodeCategory::Scroll,
             Code::KnobButton | Code::ScrollButton | Code::DialButton => CodeCategory::ScrollPress,
-            Code::Macro | Code::Menu | Code::None => CodeCategory::Dummy,
-            _ => CodeCategory::Combo,
+            Code::TallDbl
+            | Code::SideDbl
+            | Code::ShortDbl
+            | Code::TopDbl
+            | Code::SideTop
+            | Code::SideTall
+            | Code::SideShort
+            | Code::TopTall
+            | Code::TopShort
+            | Code::TallShort
+            | Code::SideUp
+            | Code::SideDown
+            | Code::SideLeft
+            | Code::SideRight
+            | Code::TopUp
+            | Code::TopDown
+            | Code::TopLeft
+            | Code::TopRight
+            | Code::TallC1
+            | Code::TallC2
+            | Code::ShortC1
+            | Code::ShortC2
+            | Code::TallKnob
+            | Code::ShortKnob
+            | Code::TopKnob
+            | Code::SideKnob
+            | Code::TallScroll
+            | Code::ShortScroll
+            | Code::TopScroll
+            | Code::SideScroll => CodeCategory::Combo,
         }
     }
 
@@ -147,13 +167,13 @@ impl Code {
     }
 
     /// if this is a double-press, return the single-press version
-    pub fn dedup(self: Code) -> Code {
+    pub fn dedup(self: Code) -> Option<Code> {
         match self {
-            Code::TallDbl => Code::Tall,
-            Code::SideDbl => Code::Side,
-            Code::TopDbl => Code::Top,
-            Code::ShortDbl => Code::Short,
-            _ => self,
+            Code::TallDbl => Some(Code::Tall),
+            Code::SideDbl => Some(Code::Side),
+            Code::TopDbl => Some(Code::Top),
+            Code::ShortDbl => Some(Code::Short),
+            _ => None,
         }
     }
 
@@ -178,48 +198,52 @@ impl Code {
         }
     }
 
-    pub fn to_fallback(self: Code) -> Option<(Code, Code)> {
+    pub fn to_fallbacks_opt(self: Code) -> Option<&'static [Code]> {
         match self {
-            Code::TallDbl => Some((Code::Tall, Code::None)),
-            Code::SideDbl => Some((Code::Side, Code::None)),
-            Code::TopDbl => Some((Code::Top, Code::None)),
-            Code::ShortDbl => Some((Code::Short, Code::None)),
+            Code::TallDbl => Some(&[Code::Tall]),
+            Code::SideDbl => Some(&[Code::Side]),
+            Code::TopDbl => Some(&[Code::Top]),
+            Code::ShortDbl => Some(&[Code::Short]),
 
-            Code::SideTop => Some((Code::Side, Code::Top)),
-            Code::SideTall => Some((Code::Side, Code::Tall)),
-            Code::SideShort => Some((Code::Side, Code::Short)),
-            Code::TopTall => Some((Code::Top, Code::Tall)),
-            Code::TopShort => Some((Code::Top, Code::Short)),
-            Code::TallShort => Some((Code::Tall, Code::Short)),
+            Code::SideTop => Some(&[Code::Side, Code::Top]),
+            Code::SideTall => Some(&[Code::Side, Code::Tall]),
+            Code::SideShort => Some(&[Code::Side, Code::Short]),
+            Code::TopTall => Some(&[Code::Top, Code::Tall]),
+            Code::TopShort => Some(&[Code::Top, Code::Short]),
+            Code::TallShort => Some(&[Code::Tall, Code::Short]),
 
-            Code::SideUp => Some((Code::Side, Code::Up)),
-            Code::SideDown => Some((Code::Side, Code::Down)),
-            Code::SideLeft => Some((Code::Side, Code::Left)),
-            Code::SideRight => Some((Code::Side, Code::Right)),
+            Code::SideUp => Some(&[Code::Side, Code::Up]),
+            Code::SideDown => Some(&[Code::Side, Code::Down]),
+            Code::SideLeft => Some(&[Code::Side, Code::Left]),
+            Code::SideRight => Some(&[Code::Side, Code::Right]),
 
-            Code::TopUp => Some((Code::Top, Code::Up)),
-            Code::TopDown => Some((Code::Top, Code::Down)),
-            Code::TopLeft => Some((Code::Top, Code::Left)),
-            Code::TopRight => Some((Code::Top, Code::Right)),
+            Code::TopUp => Some(&[Code::Top, Code::Up]),
+            Code::TopDown => Some(&[Code::Top, Code::Down]),
+            Code::TopLeft => Some(&[Code::Top, Code::Left]),
+            Code::TopRight => Some(&[Code::Top, Code::Right]),
 
-            Code::TallC1 => Some((Code::Tall, Code::C1)),
-            Code::TallC2 => Some((Code::Tall, Code::C2)),
+            Code::TallC1 => Some(&[Code::Tall, Code::C1]),
+            Code::TallC2 => Some(&[Code::Tall, Code::C2]),
 
-            Code::ShortC1 => Some((Code::Short, Code::C1)),
-            Code::ShortC2 => Some((Code::Short, Code::C2)),
+            Code::ShortC1 => Some(&[Code::Short, Code::C1]),
+            Code::ShortC2 => Some(&[Code::Short, Code::C2]),
 
-            Code::TallKnob => Some((Code::Tall, Code::Knob)),
-            Code::ShortKnob => Some((Code::Short, Code::Knob)),
-            Code::TopKnob => Some((Code::Top, Code::Knob)),
-            Code::SideKnob => Some((Code::Side, Code::Knob)),
+            Code::TallKnob => Some(&[Code::Tall, Code::Knob]),
+            Code::ShortKnob => Some(&[Code::Short, Code::Knob]),
+            Code::TopKnob => Some(&[Code::Top, Code::Knob]),
+            Code::SideKnob => Some(&[Code::Side, Code::Knob]),
 
-            Code::TallScroll => Some((Code::Tall, Code::Scroll)),
-            Code::ShortScroll => Some((Code::Short, Code::Scroll)),
-            Code::TopScroll => Some((Code::Top, Code::Scroll)),
-            Code::SideScroll => Some((Code::Side, Code::Scroll)),
+            Code::TallScroll => Some(&[Code::Tall, Code::Scroll]),
+            Code::ShortScroll => Some(&[Code::Short, Code::Scroll]),
+            Code::TopScroll => Some(&[Code::Top, Code::Scroll]),
+            Code::SideScroll => Some(&[Code::Side, Code::Scroll]),
 
-            _ => return None,
+            _ => None,
         }
+    }
+
+    pub fn to_fallbacks(self: Code) -> &'static [Code] {
+        self.to_fallbacks_opt().unwrap_or(&[])
     }
 
     /// is this a combination of codes that matches a builtin combo?

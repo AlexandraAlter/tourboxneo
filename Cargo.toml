@@ -13,6 +13,7 @@ libc = "0.2.186"
 log = "0.4.29"
 mio = "1"
 mio-serial = "5.0.1"
+notify-debouncer-full = "0.7.0"
 num_enum = "0.7.6"
 regex = "1.12.3"
 serde = { version = "1.0.228", features = ["serde_derive"] }

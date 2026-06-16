@@ -55,8 +55,8 @@ fn main() {
     let mut engine = Engine::new(args.device);
 
     args.config.map(|path| {
-        let name = engine.load_config(path);
-        engine.set_config(&name)
+        let name = engine.load_config(&path).expect("config should load");
+        engine.set_config(Some(name))
     });
 
     engine.run();

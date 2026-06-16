@@ -89,7 +89,7 @@ impl fmt::Display for Modifiers {
             })
             .collect::<Vec<String>>()
             .join("");
-        write!(f, "{}", mods)
+        write!(f, "{mods}")
     }
 }
 
@@ -171,56 +171,52 @@ impl Action {
 
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let no_mods = Modifiers::default();
+        let mods_map = |mo: &Option<Modifiers>| {
+            mo.as_ref().map(|m| " ".to_owned() + &m.to_string()).unwrap_or("".to_owned())
+        };
         match self {
             Action::None => write!(f, "none"),
-            Action::Mod(mods) => write!(f, "mods {}", mods),
+            Action::Mod(mods) => write!(f, "mods {mods}"),
             Action::Key(key_code, mods) => {
-                let m = mods.as_ref().unwrap_or(&no_mods);
-                write!(f, "key {:?}{}", key_code, m)
+                write!(f, "key {key_code:?}{}", mods_map(mods))
             }
             Action::PtrMotion(x, y, mods) => {
-                let m = mods.as_ref().unwrap_or(&no_mods);
-                write!(f, "ptr motion {} {} {}", x, y, m)
+                write!(f, "ptr motion {x} {y}{}", mods_map(mods))
             }
             Action::PtrMotionAbs(x, y, x_ex, y_ex, mods) => {
-                let m = mods.as_ref().unwrap_or(&no_mods);
-                write!(f, "ptr motion abs {} {} {} {} {}", x, y, x_ex, y_ex, m)
+                write!(f, "ptr motion abs {x} {y} {x_ex} {y_ex}{}", mods_map(mods))
             }
             Action::PtrButton(btn, mods) => {
-                let m = mods.as_ref().unwrap_or(&no_mods);
-                write!(f, "ptr button {} {}", btn, m)
+                write!(f, "ptr button {btn}{}", mods_map(mods))
             }
             Action::PtrAxis(axis, v, mods) => {
-                let m = mods.as_ref().unwrap_or(&no_mods);
                 let a = match axis {
                     Axis::VerticalScroll => "vertical",
                     Axis::HorizontalScroll => "horizontal",
                 };
-                write!(f, "ptr axis {} {} {}", a, v, m)
+                write!(f, "ptr axis {a} {v}{}", mods_map(mods))
             }
             Action::PtrAxisDiscrete(axis, v, d, mods) => {
-                let m = mods.as_ref().unwrap_or(&no_mods);
                 let a = match axis {
                     Axis::VerticalScroll => "vertical",
                     Axis::HorizontalScroll => "horizontal",
                 };
-                write!(f, "ptr axis {} {} {} {}", a, v, d, m)
+                write!(f, "ptr axis {a} {v} {d}{}", mods_map(mods))
             }
             Action::Shortcut(name, rev) => {
                 let r = match rev {
-                    Some(true) => "reversed",
+                    Some(true) => " reversed",
                     Some(false) => "",
                     None => "",
                 };
-                write!(f, "shortcut {} {}", name, r)
+                write!(f, "shortcut {name}{r}")
             }
-            Action::Macro(name) => write!(f, "macro {}", name),
-            Action::MacroGroup(name) => write!(f, "macro group {}", name),
-            Action::Menu(name) => write!(f, "menu {}", name),
+            Action::Macro(name) => write!(f, "macro {name}"),
+            Action::MacroGroup(name) => write!(f, "macro group {name}"),
+            Action::Menu(name) => write!(f, "menu {name}"),
             Action::Layer(name) => {
                 let name_or_base = name.as_ref().map(|s| s.as_ref()).unwrap_or_else(|| "base");
-                write!(f, "layer {}", name_or_base)
+                write!(f, "layer {name_or_base}")
             }
         }
     }
@@ -362,6 +358,52 @@ impl Default for ActionLibrary {
         );
 
         library
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Rate {
+    Normal,
+    Slow,
+    Slower,
+}
+
+impl Rate {
+    pub fn speed(&self) -> usize {
+        match self {
+            Rate::Normal => 1,
+            Rate::Slow => 2,
+            Rate::Slower => 3,
+        }
+    }
+}
+
+/// Combi::Off means that modifiers are absolute and replace held modifiers
+/// Combi::On means that modifiers stack with held modifiers
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Combi {
+    Off,
+    On,
+}
+
+#[derive(Debug)]
+pub enum Bind {
+    Button(Rc<Action>, Combi),
+    ButtonUp(Rc<Action>),
+    ButtonRepeat(Rc<Action>, Combi),
+    ButtonAB(Rc<Action>, Rc<Action>),
+    Scroll { fwd: Rc<Action>, bak: Rc<Action>, rate: Rate },
+}
+
+impl fmt::Display for Bind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Bind::Button(_a, _c) => write!(f, "button"),
+            Bind::ButtonUp(_a) => write!(f, "buttonUp"),
+            Bind::ButtonRepeat(_a, _c) => write!(f, "buttonRepeat"),
+            Bind::ButtonAB(_a, _b) => write!(f, "buttonAB"),
+            Bind::Scroll { fwd: _, bak: _, rate: _r } => write!(f, "scroll"),
+        }
     }
 }
 
