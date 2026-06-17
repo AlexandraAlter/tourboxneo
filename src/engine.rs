@@ -294,6 +294,10 @@ impl Engine {
     /// Given a code, returns up to two fallback codes that are not currently being held
     /// Used to calculate fallbacks to combo keycodes
     fn missing_fallback_codes(&self, input: Code) -> Vec<Code> {
+        input.to_fallbacks().into_iter().filter(|c| !self.held_codes.contains(c)).cloned().collect()
+    }
+
+    fn missing_fallback_cmds(&self, input: Code) -> Vec<Code> {
         let fallbacks = input.to_fallbacks();
         match fallbacks.len() {
             a if a < 2 => Vec::from(fallbacks),
@@ -388,7 +392,7 @@ impl Engine {
         layer: &Layer<N, Rc<CustomCode>, Rc<Bind>>,
         input: Code,
     ) -> Option<(Command, Rc<Bind>)> {
-        let fallbacks = self.missing_fallback_codes(input);
+        let fallbacks = self.missing_fallback_cmds(input);
         if fallbacks.len() > 1 {
             error!(target: "engine", "more than one fallback bind matched, returning just one");
         }
@@ -598,8 +602,8 @@ impl Engine {
 
     fn execute_action_up(&mut self, msgs: &mut EngineCmds, cmd: &Command, action: Rc<Action>) {
         if !cmd.can_ignore() {
-            if let Some(Some(prev_action)) = self.held_commands.insert(cmd.clone(), None) {
-                if *prev_action != *action {
+            if let Some(Some(prev_action)) = self.held_commands.get(cmd) {
+                if *prev_action != action {
                     // we've changed layer, release the old action instead
                     info!(target: "engine", "{cmd} (up) -> cleanup({prev_action})");
                     self.execute_action_up(msgs, cmd, prev_action.clone());
@@ -609,6 +613,7 @@ impl Engine {
                 info!(target: "engine", "{cmd} (up) -> ignored");
                 return;
             }
+            self.held_commands.insert(cmd.clone(), None);
         }
 
         match &*action {
