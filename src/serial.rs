@@ -228,15 +228,15 @@ impl Code {
             Code::ShortC1 => Some(&[Code::Short, Code::C1]),
             Code::ShortC2 => Some(&[Code::Short, Code::C2]),
 
-            Code::TallKnob => Some(&[Code::Tall, Code::Knob]),
-            Code::ShortKnob => Some(&[Code::Short, Code::Knob]),
-            Code::TopKnob => Some(&[Code::Top, Code::Knob]),
-            Code::SideKnob => Some(&[Code::Side, Code::Knob]),
+            Code::TallKnob => Some(&[Code::Knob]),
+            Code::ShortKnob => Some(&[Code::Knob]),
+            Code::TopKnob => Some(&[Code::Knob]),
+            Code::SideKnob => Some(&[Code::Knob]),
 
-            Code::TallScroll => Some(&[Code::Tall, Code::Scroll]),
-            Code::ShortScroll => Some(&[Code::Short, Code::Scroll]),
-            Code::TopScroll => Some(&[Code::Top, Code::Scroll]),
-            Code::SideScroll => Some(&[Code::Side, Code::Scroll]),
+            Code::TallScroll => Some(&[Code::Scroll]),
+            Code::ShortScroll => Some(&[Code::Scroll]),
+            Code::TopScroll => Some(&[Code::Scroll]),
+            Code::SideScroll => Some(&[Code::Scroll]),
 
             _ => None,
         }

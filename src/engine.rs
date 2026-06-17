@@ -294,7 +294,16 @@ impl Engine {
     /// Given a code, returns up to two fallback codes that are not currently being held
     /// Used to calculate fallbacks to combo keycodes
     fn missing_fallback_codes(&self, input: Code) -> Vec<Code> {
-        input.to_fallbacks().into_iter().filter(|c| !self.held_codes.contains(c)).cloned().collect()
+        let fallbacks = input.to_fallbacks();
+        match fallbacks.len() {
+            a if a < 2 => Vec::from(fallbacks),
+            // TODO make sure this handles okay on release, and test thoroughly
+            _ => fallbacks
+                .iter()
+                .filter(|c| self.held_commands.get(&Command::Simple(**c)).is_none())
+                .cloned()
+                .collect(),
+        }
     }
 
     /// A command is invalid if it's a subset of any command in `self.invalidated_commands`
@@ -381,7 +390,7 @@ impl Engine {
     ) -> Option<(Command, Rc<Bind>)> {
         let fallbacks = self.missing_fallback_codes(input);
         if fallbacks.len() > 1 {
-            error!(target: "engine", "two fallback binds matched, returning just one");
+            error!(target: "engine", "more than one fallback bind matched, returning just one");
         }
         fallbacks.first().and_then(|c| self.lookup_simple(layer, *c))
     }
@@ -419,8 +428,8 @@ impl Engine {
                     .or_else(|| self.lookup_custom(&self.config.base, code))
                     .or_else(|| self.lookup_simple(layer, code))
                     .or_else(|| self.lookup_simple(&self.config.base, code))
-                    .or_else(|| self.lookup_fallback(&self.config.base, code))
                     .or_else(|| self.lookup_fallback(layer, code))
+                    .or_else(|| self.lookup_fallback(&self.config.base, code))
             }
             None => self
                 .lookup_custom(&self.config.base, code)
@@ -470,11 +479,13 @@ impl Engine {
         action: Rc<Action>,
         combi: Combi,
     ) {
-        if !cmd.can_ignore()
-            && let Some(Some(prev_action)) =
-                self.held_commands.insert(cmd.clone(), Some(action.clone()))
-        {
-            error!("{} was set to a previous action {}", cmd, prev_action);
+        if !cmd.can_ignore() {
+            if let Some(Some(prev_action)) = self.held_commands.get(cmd) {
+                // we've changed layer, release the old action
+                info!(target: "engine", "{cmd} (down) -> cleanup({prev_action})");
+                self.execute_action_up(msgs, cmd, prev_action.clone());
+            }
+            self.held_commands.insert(cmd.clone(), Some(action.clone()));
         }
 
         match &*action {
@@ -595,7 +606,8 @@ impl Engine {
                     return;
                 }
             } else {
-                error!("released a command that wasn't being held");
+                info!(target: "engine", "{cmd} (up) -> ignored");
+                return;
             }
         }
 
@@ -727,7 +739,7 @@ impl Engine {
         }
     }
 
-    /// set any new code as being held
+    /// set any new code as being held, and return them
     fn set_held_codes(&mut self, input: &Input) {
         if !input.release {
             if input.code.is_basic() && !self.held_codes.contains(&input.code) {
@@ -804,7 +816,6 @@ impl Engine {
                     self.set_held_codes(&input);
                     if let Some((cmd, bind)) = self.lookup(input.code) {
                         self.set_invalid_cmds(&input, &cmd);
-                        dbg!(&self.invalidated_commands);
                         if !input.release {
                             let entry = self.held_commands.entry(cmd.clone());
                             if let Entry::Occupied(_) = entry {
@@ -900,6 +911,7 @@ impl Engine {
             }
             if !self.held_commands.is_empty() {
                 error!(target: "engine", "no codes are held, but a command is still held");
+                dbg!(&self.held_commands);
             }
             if self.output.held_keys_count() > 0 {
                 error!(target: "engine", "no codes are held, but the output still has keys");
