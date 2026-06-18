@@ -938,8 +938,6 @@ impl Engine {
             .register(&mut self.timer, REPEAT, Interest::READABLE)
             .expect("MIO timer should register");
 
-        self.watcher.watch(Path::new("darktable.toml"), RecursiveMode::NonRecursive).unwrap();
-
         let mut events = Events::with_capacity(128);
 
         loop {
