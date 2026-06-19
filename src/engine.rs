@@ -187,15 +187,15 @@ impl RepeatTracker {
 
 /// Central engine managing peripheral state
 pub struct Engine {
-    /// Serial source to the device
+    /// Serial source from the device
     serial: SerialEventStream,
     /// Timer source for repeating keys
     timer: TimerFd,
-    /// Menu if a menu is active
+    /// Currently active menu, or none
     menu: Option<FuzzelMenu>,
     /// Watcher for file changes
     watcher: Debouncer<INotifyWatcher, NoCache>,
-    /// Watcher for file changes
+    /// Watcher receiving pipe for file changes
     watcher_rx: Receiver<Result<Vec<DebouncedEvent>, Vec<notify::Error>>>,
     /// Output for Wayland
     output: OutputDriver,
@@ -205,7 +205,7 @@ pub struct Engine {
     config: Rc<Config>,
     /// Currently active layer, or None for the base layer
     layer: Option<String>,
-    /// Held codes, for custom actions
+    /// Held basic codes only, used for custom actions
     held_codes: Vec<Code>,
     /// Tracks how many times a code has been pressed in a certain window
     repeat_tracker: HashMap<Code, RepeatTracker>,
@@ -250,6 +250,7 @@ impl Engine {
         }
     }
 
+    /// Load a config from the disk, adding it to the watch list
     pub fn load_config(&mut self, path: &PathBuf) -> Option<String> {
         let path = std::path::absolute(path).expect("path should become absolute");
         self.watcher.unwatch(&path).ok();
@@ -265,11 +266,13 @@ impl Engine {
         name
     }
 
+    /// Try to reload the current config from the manager
     fn reload_cur_config(&mut self) {
         self.output.cleanse();
         self.set_config(Some(self.config.name.clone()))
     }
 
+    /// Switch to a loaded config in the manager
     pub fn set_config(&mut self, config: Option<String>) {
         self.output.cleanse();
         match config {
@@ -289,6 +292,8 @@ impl Engine {
         self.layer = self.config.default_layer.clone();
     }
 
+    /// Reset the dial tickers and macro tickers
+    /// Call when changing layer or config
     fn reset_ticks(&mut self) {
         self.dial_ticks.clear();
         self.macro_group_ticks.clear();
@@ -449,6 +454,7 @@ impl Engine {
         }
     }
 
+    /// Append or set modifiers (and related keys)
     fn mods_down(&mut self, mods: &Modifiers, combi: Combi) {
         for key in mods.keys() {
             self.output.key_press(*key);
@@ -459,6 +465,7 @@ impl Engine {
         }
     }
 
+    /// Release modifiers (and related keys)
     fn mods_up(&mut self, mods: &Modifiers) {
         for key in mods.keys() {
             self.output.key_release(*key);
@@ -483,6 +490,7 @@ impl Engine {
         }
     }
 
+    /// Given a command and action, add it to the held list and execute the action's press
     fn execute_action_down(
         &mut self,
         msgs: &mut EngineCmds,
@@ -607,6 +615,7 @@ impl Engine {
         };
     }
 
+    /// Given a command and action, remove it from the held list, execute the action's release, restore held modifiers
     fn execute_action_up(&mut self, msgs: &mut EngineCmds, cmd: &Command, action: Rc<Action>) {
         if !cmd.can_ignore() {
             if let Some(Some(prev_action)) = self.held_commands.get(cmd) {
@@ -667,6 +676,7 @@ impl Engine {
         self.resume_held_commands();
     }
 
+    /// Given a command and binding, optionally run some actions
     fn execute_bind(&mut self, msgs: &mut EngineCmds, input: &Input, cmd: &Command, bind: &Bind) {
         match bind {
             Bind::Button(action, combi) => {
@@ -751,7 +761,7 @@ impl Engine {
         }
     }
 
-    /// set any new code as being held, and return them
+    /// set any new code as being held
     fn set_held_codes(&mut self, input: &Input) {
         if !input.release {
             if input.code.is_basic() && !self.held_codes.contains(&input.code) {
@@ -765,7 +775,7 @@ impl Engine {
         }
     }
 
-    /// set or invalidate held commands
+    /// set invalidated commands
     fn set_invalid_commands(&mut self, input: &Input, cmd: &Command) {
         // An invalidated command is set when:
         // - a multi-code command covers already-held commands
@@ -784,7 +794,7 @@ impl Engine {
         }
     }
 
-    /// release any code that's no longer held, release invalidated commands that no longer apply
+    /// release any code that's no longer held and release invalidated commands that no longer apply
     fn release_held_codes_or_commands(&mut self, input: &Input) {
         if input.release {
             self.held_codes.retain(|c| {
@@ -806,6 +816,7 @@ impl Engine {
         }
     }
 
+    /// Update `repeat_tracker`, resetting the count if it's past `REPEAT_MS`
     fn update_repeat_tracker(&mut self, input: &Input) {
         if !input.release {
             let code = input.code.dedup().unwrap_or(input.code);
@@ -819,16 +830,14 @@ impl Engine {
         }
     }
 
-    // handle a serial input from the device
+    /// handle a serial input from the device
     fn handle_serial(&mut self, msgs: &mut EngineCmds) {
         loop {
             match self.serial.next() {
                 Some(Ok(input)) => {
-                    dbg!(&input);
                     self.update_repeat_tracker(&input);
                     self.set_held_codes(&input);
                     if let Some((cmd, bind)) = self.lookup(input.code) {
-                        dbg!(&cmd, &bind);
                         self.set_invalid_commands(&input, &cmd);
                         if !input.release {
                             let entry = self.held_commands.entry(cmd.clone());
@@ -852,7 +861,6 @@ impl Engine {
                         debug!(target: "engine", "{input} -> no binding for code");
                     }
                     self.release_held_codes_or_commands(&input);
-                    dbg!(&self.invalidated_commands);
                 }
                 Some(Err(ref err)) if would_block(err) => break,
                 Some(Err(err)) => panic!("{}", err),
@@ -861,7 +869,8 @@ impl Engine {
         }
     }
 
-    // handle a timer-based repetition
+    /// handle a timer-based repetition
+    // TODO implement this
     fn handle_repeat(&mut self, msgs: &mut EngineCmds) {
         info!(target: "engine", "timer tick");
         self.timer.set_timeout(&Duration::from_millis(10)).unwrap();
@@ -869,7 +878,7 @@ impl Engine {
         assert!(timeout_num == 1);
     }
 
-    // handle the return of an external menu
+    /// handle the return of an external menu
     fn handle_menu(&mut self, msgs: &mut EngineCmds) {
         let menu = self.menu.as_mut().expect("menu should exist");
         match menu.read_action().expect("menu should provide an action") {
@@ -882,7 +891,7 @@ impl Engine {
         }
     }
 
-    // handle a message passed from deeper in the event loop
+    /// handle a message passed from deeper in the event loop
     fn handle_engine_msgs(&mut self, msgs: EngineCmds, poll: &mut Poll) {
         for cmd in msgs.get().into_iter() {
             match cmd {
@@ -894,6 +903,7 @@ impl Engine {
         }
     }
 
+    /// register a new menu pipe
     fn register_menu_pipe(&mut self, poll: &mut Poll, mut menu: FuzzelMenu) {
         if let Some(_) = &self.menu {
             warn!(target: "engine", "menu duplication, killing old menu");
@@ -908,6 +918,7 @@ impl Engine {
         self.menu = Some(menu);
     }
 
+    /// deregister a new menu pipe
     fn deregister_menu_pipe(&mut self, poll: &mut Poll) {
         let menu = self.menu.as_mut().expect("menu should exist");
         poll.registry()
@@ -919,6 +930,7 @@ impl Engine {
         self.menu = None;
     }
 
+    /// A few common-sense checks to be run at the start and end of every cycle
     fn sanity_check(&self) {
         if self.held_codes.is_empty() {
             if !self.invalidated_commands.is_empty() {
@@ -926,7 +938,6 @@ impl Engine {
             }
             if !self.held_commands.is_empty() {
                 error!(target: "engine", "no codes are held, but a command is still held");
-                dbg!(&self.held_commands);
             }
             if self.output.held_keys_count() > 0 {
                 error!(target: "engine", "no codes are held, but the output still has keys");
@@ -939,6 +950,7 @@ impl Engine {
         }
     }
 
+    /// Enter the event loop with MIO
     pub fn run(&mut self) {
         let mut poll = Poll::new().expect("MIO poll should start");
         poll.registry()
