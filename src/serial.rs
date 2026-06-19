@@ -246,6 +246,28 @@ impl Code {
         self.to_fallbacks_opt().unwrap_or(&[])
     }
 
+    /// Constituants are a little broader than fallbacks, and cover other codes we should invalidate
+    pub fn to_constituants_opt(self: Code) -> Option<&'static [Code]> {
+        match self {
+            Code::TallKnob => Some(&[Code::Knob, Code::Tall]),
+            Code::ShortKnob => Some(&[Code::Knob, Code::Short]),
+            Code::TopKnob => Some(&[Code::Knob, Code::Top]),
+            Code::SideKnob => Some(&[Code::Knob, Code::Side]),
+
+            Code::TallScroll => Some(&[Code::Scroll, Code::Tall]),
+            Code::ShortScroll => Some(&[Code::Scroll, Code::Short]),
+            Code::TopScroll => Some(&[Code::Scroll, Code::Top]),
+            Code::SideScroll => Some(&[Code::Scroll, Code::Side]),
+
+            _ => self.to_fallbacks_opt(),
+        }
+    }
+
+    /// Constituants are a little broader than fallbacks, and cover other codes we should invalidate
+    pub fn to_constituants(self: Code) -> &'static [Code] {
+        self.to_constituants_opt().unwrap_or(&[])
+    }
+
     /// is this a combination of codes that matches a builtin combo?
     /// assumes `codes` is sorted
     pub fn is_builtin_combo(codes: &Vec<Code>) -> bool {

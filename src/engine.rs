@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, LinkedList};
 use std::fmt;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -40,6 +40,7 @@ pub enum Command {
 }
 
 impl Command {
+    /// If this command decomposes into one `is_basic` codes, return it
     pub fn into_single_code(&self) -> Option<Code> {
         match self {
             Command::Simple(code) if code.is_basic() => Some(*code),
@@ -56,11 +57,12 @@ impl Command {
         }
     }
 
+    /// If this command decomposes into several `is_basic` codes, return them
     pub fn into_multiple_codes(&self) -> Option<&[Code]> {
         match self {
             Command::Simple(code) => {
-                let fallbacks = code.to_fallbacks();
-                if fallbacks.len() > 1 { Some(fallbacks) } else { None }
+                let constituants = code.to_constituants();
+                if constituants.len() > 1 { Some(constituants) } else { None }
             }
             Command::Custom(custom_code) => match &**custom_code {
                 CustomCode::Series(_code, _) => None,
@@ -82,19 +84,20 @@ impl Command {
     }
 
     pub fn is_subset(&self, other: &Command) -> bool {
-        if let Some(c_self) = self.into_single_code() {
-            if let Some(c_other) = other.into_single_code() {
-                c_self == c_other
-            } else if let Some(cs_other) = other.into_multiple_codes() {
-                cs_other.contains(&c_self)
+        // run multiple_codes functions first, in case both functions return usable data
+        if let Some(cs_self) = self.into_multiple_codes() {
+            if let Some(cs_other) = other.into_multiple_codes() {
+                cs_self.iter().all(|c_self| cs_other.contains(c_self))
+            } else if let Some(_) = other.into_single_code() {
+                false
             } else {
                 unreachable!()
             }
-        } else if let Some(cs_self) = self.into_multiple_codes() {
-            if let Some(_) = other.into_single_code() {
-                false
-            } else if let Some(cs_other) = other.into_multiple_codes() {
-                cs_self.iter().all(|c_self| cs_other.contains(c_self))
+        } else if let Some(c_self) = self.into_single_code() {
+            if let Some(cs_other) = other.into_multiple_codes() {
+                cs_other.contains(&c_self)
+            } else if let Some(c_other) = other.into_single_code() {
+                c_self == c_other
             } else {
                 unreachable!()
             }
@@ -293,14 +296,18 @@ impl Engine {
 
     /// Given a code, returns up to two fallback codes that are not currently being held
     /// Used to calculate fallbacks to combo keycodes
-    fn missing_fallback_codes(&self, input: Code) -> Vec<Code> {
+    fn find_missing_fallback_codes(&self, input: Code) -> Vec<Code> {
         input.to_fallbacks().into_iter().filter(|c| !self.held_codes.contains(c)).cloned().collect()
     }
 
-    fn missing_fallback_cmds(&self, input: Code) -> Vec<Code> {
+    /// Given a code, returns up to two fallback commands that are not currently being held
+    /// Used to calculate fallbacks to combo keycodes
+    fn find_missing_fallback_commands(&self, input: Code) -> Vec<Code> {
         let fallbacks = input.to_fallbacks();
         match fallbacks.len() {
-            a if a < 2 => Vec::from(fallbacks),
+            0 => Vec::from(fallbacks),
+            // We only get one fallback if it's a double or a scroll
+            1 => Vec::from(fallbacks),
             // TODO make sure this handles okay on release, and test thoroughly
             _ => fallbacks
                 .iter()
@@ -392,7 +399,7 @@ impl Engine {
         layer: &Layer<N, Rc<CustomCode>, Rc<Bind>>,
         input: Code,
     ) -> Option<(Command, Rc<Bind>)> {
-        let fallbacks = self.missing_fallback_cmds(input);
+        let fallbacks = self.find_missing_fallback_commands(input);
         if fallbacks.len() > 1 {
             error!(target: "engine", "more than one fallback bind matched, returning just one");
         }
@@ -750,7 +757,7 @@ impl Engine {
             if input.code.is_basic() && !self.held_codes.contains(&input.code) {
                 self.held_codes.push(input.code);
             } else {
-                for code in self.missing_fallback_codes(input.code) {
+                for code in self.find_missing_fallback_codes(input.code) {
                     self.held_codes.push(code);
                 }
             }
@@ -759,26 +766,26 @@ impl Engine {
     }
 
     /// set or invalidate held commands
-    fn set_invalid_cmds(&mut self, input: &Input, cmd: &Command) {
+    fn set_invalid_commands(&mut self, input: &Input, cmd: &Command) {
         // An invalidated command is set when:
         // - a multi-code command covers already-held commands
         if !input.release {
             if cmd.into_multiple_codes().is_some() {
-                let mut invalid: Vec<_> = self
+                let mut invalid_cmds: Vec<_> = self
                     .held_commands
                     .keys()
                     .filter(|held_cmd| {
-                        held_cmd.is_subset(cmd) && !self.invalidated_commands.contains(cmd)
+                        held_cmd.is_subset(cmd) && !self.invalidated_commands.contains(held_cmd)
                     })
                     .cloned()
                     .collect();
-                self.invalidated_commands.append(&mut invalid);
+                self.invalidated_commands.append(&mut invalid_cmds);
             }
         }
     }
 
     /// release any code that's no longer held, release invalidated commands that no longer apply
-    fn release_held_codes_or_cmds(&mut self, input: &Input) {
+    fn release_held_codes_or_commands(&mut self, input: &Input) {
         if input.release {
             self.held_codes.retain(|c| {
                 *c != input.code
@@ -817,10 +824,12 @@ impl Engine {
         loop {
             match self.serial.next() {
                 Some(Ok(input)) => {
+                    dbg!(&input);
                     self.update_repeat_tracker(&input);
                     self.set_held_codes(&input);
                     if let Some((cmd, bind)) = self.lookup(input.code) {
-                        self.set_invalid_cmds(&input, &cmd);
+                        dbg!(&cmd, &bind);
+                        self.set_invalid_commands(&input, &cmd);
                         if !input.release {
                             let entry = self.held_commands.entry(cmd.clone());
                             if let Entry::Occupied(_) = entry {
@@ -842,7 +851,8 @@ impl Engine {
                     } else {
                         debug!(target: "engine", "{input} -> no binding for code");
                     }
-                    self.release_held_codes_or_cmds(&input);
+                    self.release_held_codes_or_commands(&input);
+                    dbg!(&self.invalidated_commands);
                 }
                 Some(Err(ref err)) if would_block(err) => break,
                 Some(Err(err)) => panic!("{}", err),
