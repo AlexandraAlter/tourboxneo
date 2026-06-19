@@ -121,20 +121,26 @@ impl fmt::Display for Command {
 
 // TODO make this reset on reversal
 pub struct Tickers {
-    knob: usize,
-    scroll: usize,
-    dial: usize,
+    knob_fwd: usize,
+    knob_bak: usize,
+    scroll_fwd: usize,
+    scroll_bak: usize,
+    dial_fwd: usize,
+    dial_bak: usize,
 }
 
 impl Tickers {
     pub fn new() -> Tickers {
-        Tickers { knob: 0, scroll: 0, dial: 0 }
+        Tickers { knob_fwd: 0, knob_bak: 0, scroll_fwd: 0, scroll_bak: 0, dial_fwd: 0, dial_bak: 0 }
     }
 
     fn clear(&mut self) {
-        self.knob = 0;
-        self.scroll = 0;
-        self.dial = 0;
+        self.knob_fwd = 0;
+        self.knob_bak = 0;
+        self.scroll_fwd = 0;
+        self.scroll_bak = 0;
+        self.dial_fwd = 0;
+        self.dial_bak = 0;
     }
 }
 
@@ -290,6 +296,18 @@ impl Engine {
             }
         }
         self.layer = self.config.default_layer.clone();
+    }
+
+    fn get_dial_tick(&mut self, code: Code, reverse: bool) -> &mut usize {
+        match (code.to_scroll_trio(), reverse) {
+            (Some(Code::Knob), false) => &mut self.dial_ticks.knob_fwd,
+            (Some(Code::Knob), true) => &mut self.dial_ticks.knob_bak,
+            (Some(Code::Scroll), false) => &mut self.dial_ticks.scroll_fwd,
+            (Some(Code::Scroll), true) => &mut self.dial_ticks.scroll_bak,
+            (Some(Code::Dial), false) => &mut self.dial_ticks.dial_fwd,
+            (Some(Code::Dial), true) => &mut self.dial_ticks.dial_bak,
+            _ => panic!("scrolled something that should not scroll"),
+        }
     }
 
     /// Reset the dial tickers and macro tickers
@@ -720,35 +738,26 @@ impl Engine {
             Bind::Scroll { fwd, bak, rate } => {
                 if !input.release {
                     let counter = match cmd {
-                        Command::Simple(code) => match code.to_scroll_trio() {
-                            Some(Code::Knob) => &mut self.dial_ticks.knob,
-                            Some(Code::Scroll) => &mut self.dial_ticks.scroll,
-                            Some(Code::Dial) => &mut self.dial_ticks.dial,
-                            _ => panic!("scrolled something that should not scroll"),
-                        },
+                        Command::Simple(code) => self.get_dial_tick(*code, input.reverse),
                         Command::Custom(custom_cmd) => match &**custom_cmd {
                             // TODO test both of these
                             CustomCode::Series(_, _) => {
                                 todo!("custom serial binds cannot be scrolled yet")
                             }
                             CustomCode::Parallel(codes) => {
-                                let code = codes.iter().filter_map(|c| c.to_scroll_trio()).nth(0);
-                                match code {
-                                    Some(Code::Knob) => &mut self.dial_ticks.knob,
-                                    Some(Code::Scroll) => &mut self.dial_ticks.scroll,
-                                    Some(Code::Dial) => &mut self.dial_ticks.dial,
-                                    _ => panic!("scrolled something that should not scroll"),
-                                }
+                                let code = codes
+                                    .iter()
+                                    .filter_map(|c| c.to_scroll_trio())
+                                    .nth(0)
+                                    .expect("parallel command should have one scrollable code");
+                                self.get_dial_tick(code, input.reverse)
                             }
                         },
                         _ => panic!("scrolled something that should not scroll"),
                     };
-                    *counter = if input.reverse {
-                        counter.wrapping_sub(1)
-                    } else {
-                        counter.wrapping_add(1)
-                    };
+                    *counter = counter.wrapping_add(1);
                     if *counter % rate.speed() == 0 {
+                        self.dial_ticks.clear();
                         let action = if input.reverse { bak } else { fwd };
                         if !input.release {
                             info!(target: "engine", "{cmd} -> {bind}({action})");
