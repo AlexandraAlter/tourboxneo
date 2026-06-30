@@ -142,6 +142,18 @@ impl Tickers {
         self.dial_fwd = 0;
         self.dial_bak = 0;
     }
+
+    fn get(&mut self, code: Code, reverse: bool) -> (&mut usize, &mut usize) {
+        match (code.to_scroll_trio(), reverse) {
+            (Some(Code::Knob), false) => (&mut self.knob_fwd, &mut self.knob_bak),
+            (Some(Code::Knob), true) => (&mut self.knob_bak, &mut self.knob_fwd),
+            (Some(Code::Scroll), false) => (&mut self.scroll_fwd, &mut self.scroll_bak),
+            (Some(Code::Scroll), true) => (&mut self.scroll_bak, &mut self.scroll_fwd),
+            (Some(Code::Dial), false) => (&mut self.dial_fwd, &mut self.dial_bak),
+            (Some(Code::Dial), true) => (&mut self.dial_bak, &mut self.dial_fwd),
+            _ => panic!("scrolled something that should not scroll"),
+        }
+    }
 }
 
 pub enum EngineCmd {
@@ -296,18 +308,6 @@ impl Engine {
             }
         }
         self.layer = self.config.default_layer.clone();
-    }
-
-    fn get_dial_tick(&mut self, code: Code, reverse: bool) -> &mut usize {
-        match (code.to_scroll_trio(), reverse) {
-            (Some(Code::Knob), false) => &mut self.dial_ticks.knob_fwd,
-            (Some(Code::Knob), true) => &mut self.dial_ticks.knob_bak,
-            (Some(Code::Scroll), false) => &mut self.dial_ticks.scroll_fwd,
-            (Some(Code::Scroll), true) => &mut self.dial_ticks.scroll_bak,
-            (Some(Code::Dial), false) => &mut self.dial_ticks.dial_fwd,
-            (Some(Code::Dial), true) => &mut self.dial_ticks.dial_bak,
-            _ => panic!("scrolled something that should not scroll"),
-        }
     }
 
     /// Reset the dial tickers and macro tickers
@@ -472,14 +472,26 @@ impl Engine {
         }
     }
 
+    /// Lookup whether we're releasing something already held
+    fn lookup_held(&self, code: Code) -> Option<(Command, Rc<Action>)> {
+        self.held_commands
+            .iter()
+            .find(|(c, a)| {
+                (c.into_single_code() == Some(code)
+                    || c.into_multiple_codes() == Some(&self.held_codes))
+                    && a.is_some()
+            })
+            .map(|(c, a)| (c.clone(), a.as_ref().unwrap().clone()))
+    }
+
     /// Append or set modifiers (and related keys)
     fn mods_down(&mut self, mods: &Modifiers, combi: Combi) {
         for key in mods.keys() {
             self.output.key_press(*key);
         }
         match combi {
-            Combi::Off => self.output.mod_append(*mods.flags()),
-            Combi::On => self.output.mod_set(*mods.flags()),
+            Combi::On => self.output.mod_append(*mods.flags()),
+            Combi::Off => self.output.mod_set(*mods.flags()),
         }
     }
 
@@ -639,7 +651,7 @@ impl Engine {
             if let Some(Some(prev_action)) = self.held_commands.get(cmd) {
                 if *prev_action != action {
                     // we've changed layer, release the old action instead
-                    info!(target: "engine", "{cmd} (up) -> cleanup({prev_action})");
+                    warn!(target: "engine", "{cmd} (up) -> late cleanup({prev_action})");
                     self.execute_action_up(msgs, cmd, prev_action.clone());
                     return;
                 }
@@ -737,12 +749,12 @@ impl Engine {
             }
             Bind::Scroll { fwd, bak, rate } => {
                 if !input.release {
-                    let counter = match cmd {
-                        Command::Simple(code) => self.get_dial_tick(*code, input.reverse),
+                    let (counter, counter_rev) = match cmd {
+                        Command::Simple(code) => self.dial_ticks.get(*code, input.reverse),
                         Command::Custom(custom_cmd) => match &**custom_cmd {
                             // TODO test both of these
                             CustomCode::Series(_, _) => {
-                                todo!("custom serial binds cannot be scrolled yet")
+                                todo!("custom binds cannot be scrolled yet")
                             }
                             CustomCode::Parallel(codes) => {
                                 let code = codes
@@ -750,12 +762,13 @@ impl Engine {
                                     .filter_map(|c| c.to_scroll_trio())
                                     .nth(0)
                                     .expect("parallel command should have one scrollable code");
-                                self.get_dial_tick(code, input.reverse)
+                                self.dial_ticks.get(code, input.reverse)
                             }
                         },
                         _ => panic!("scrolled something that should not scroll"),
                     };
                     *counter = counter.wrapping_add(1);
+                    *counter_rev = 0;
                     if *counter % rate.speed() == 0 {
                         self.dial_ticks.clear();
                         let action = if input.reverse { bak } else { fwd };
@@ -846,6 +859,15 @@ impl Engine {
                 Some(Ok(input)) => {
                     self.update_repeat_tracker(&input);
                     self.set_held_codes(&input);
+                    if input.release
+                        && let Some((cmd, prev_action)) = self.lookup_held(input.code)
+                    {
+                        info!(target: "engine", "{cmd} (up) -> early cleanup({prev_action})");
+                        self.execute_action_up(msgs, &cmd, prev_action);
+                        if let Some(Some(c)) = self.held_commands.remove(&cmd) {
+                            panic!("held command {c:?} should have been emptied by this point");
+                        };
+                    }
                     if let Some((cmd, bind)) = self.lookup(input.code) {
                         self.set_invalid_commands(&input, &cmd);
                         if !input.release {
@@ -943,13 +965,13 @@ impl Engine {
     fn sanity_check(&self) {
         if self.held_codes.is_empty() {
             if !self.invalidated_commands.is_empty() {
-                error!(target: "engine", "no codes are held, but an invalidated code is still held");
+                error!(target: "engine", "no codes are held, but an invalidated code is still held:\n{:?}", &self.invalidated_commands);
             }
             if !self.held_commands.is_empty() {
-                error!(target: "engine", "no codes are held, but a command is still held");
+                error!(target: "engine", "no codes are held, but a command is still held:\n{:?}", &self.held_commands);
             }
             if self.output.held_keys_count() > 0 {
-                error!(target: "engine", "no codes are held, but the output still has keys");
+                error!(target: "engine", "no codes are held, but the output still has keys:\n{:?}", &self.output.held_keys());
             }
         }
         if let None = self.layer

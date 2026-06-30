@@ -214,6 +214,10 @@ impl OutputDriver {
         self.locks_clear();
     }
 
+    pub fn held_keys(&self) -> &Vec<evdev::KeyCode> {
+        &self.held_keys
+    }
+
     pub fn held_keys_count(&self) -> usize {
         self.held_keys.len()
     }
