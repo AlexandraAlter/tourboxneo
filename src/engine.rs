@@ -480,14 +480,13 @@ impl Engine {
 
     /// Lookup whether we're releasing something already held
     fn lookup_released(&self) -> impl Iterator<Item = (Command, Rc<Bind>)> {
-        dbg!(&self.held_codes);
         self.held_binds
             .iter()
             .filter(move |(cmd, _b)| {
                 if let Some(code) = cmd.into_single_code() {
                     !self.held_codes.contains(&code)
                 } else if let Some(codes) = cmd.into_multiple_codes() {
-                    !codes.iter().any(|c| !self.held_codes.contains(c))
+                    codes.iter().any(|c| !self.held_codes.contains(c))
                 } else {
                     true
                 }
