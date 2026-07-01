@@ -1,4 +1,3 @@
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, LinkedList};
 use std::fmt;
 use std::io::{self, Write};
@@ -541,7 +540,8 @@ impl Engine {
         if !cmd.can_ignore() {
             if let Some(prev_action) = self.held_actions.get(cmd) {
                 // we've changed layer, release the old action
-                info!(target: "engine", "{cmd} (down) -> clobbering cleanup({prev_action})");
+                // this shouldn't really happen
+                warn!(target: "engine", "{cmd} (down) -> clobbering cleanup({prev_action})");
                 self.execute_action_up(msgs, cmd, None);
             }
             self.held_actions.insert(cmd.clone(), action.clone());
@@ -622,7 +622,6 @@ impl Engine {
                 let menu = self.config.menus.get(name).expect("menu should exist");
                 msgs.push_menu(FuzzelMenu::new(menu.clone(), self.layer.clone()));
                 self.layer = Some("menu".to_string());
-                // reset all the tickers
                 self.reset_ticks();
             }
             Action::Layer(Some(name)) => {
@@ -671,20 +670,6 @@ impl Engine {
             }
             self.held_actions.remove(cmd).expect("action should be present in held_actions")
         };
-        // if !cmd.can_ignore() {
-        //     if let Some(prev_action) = self.held_actions.get(cmd) {
-        //         if *prev_action != action {
-        //             // we've changed layer, release the old action instead
-        //             warn!(target: "engine", "{cmd} (up) -> late cleanup({prev_action})");
-        //             self.execute_action_up(msgs, cmd, prev_action.clone());
-        //             return;
-        //         }
-        //     } else {
-        //         info!(target: "engine", "{cmd} (up) -> ignored");
-        //         return;
-        //     }
-        //     self.held_actions.insert(cmd.clone(), None);
-        // }
 
         match &*action {
             Action::None => {}
@@ -864,36 +849,9 @@ impl Engine {
         }
     }
 
-    /// release any code that's no longer held and release invalidated commands that no longer apply
+    /// release invalidated commands that no longer apply
     fn release_invalid_commands(&mut self, input: &Input) {
         if input.release {
-            // TODO move this
-            // let released_cmds: Vec<_> = self
-            //     .held_actions
-            //     .keys()
-            //     .filter(|cmd| {
-            //         if let Some(code) = cmd.into_single_code() {
-            //             !self.held_codes.contains(&code)
-            //         } else if let Some(codes) = cmd.into_multiple_codes() {
-            //             !codes.iter().any(|c| self.held_codes.contains(c))
-            //         } else {
-            //             false
-            //         }
-            //     })
-            //     .cloned()
-            //     .collect();
-            // for cmd in released_cmds {
-            //     let prev_action_opt =
-            //         self.held_actions.get(&cmd).expect("cmd should exist in held_commands");
-            //     if let Some(prev_action) = prev_action_opt {
-            //         info!(target: "engine", "{cmd} (up) -> late cleanup({prev_action})");
-            //         self.execute_action_up(msgs, &cmd, prev_action.clone());
-            //     }
-            //     if let Some(Some(c)) = self.held_actions.remove(&cmd) {
-            //         panic!("held command {c:?} should have been emptied by this point");
-            //     };
-            // }
-
             // An invalidated command can be released if all of its component inputs are released
             self.invalidated_commands.retain(|invalid_cmd| {
                 if let Some(code) = invalid_cmd.into_single_code() {
@@ -926,34 +884,19 @@ impl Engine {
         loop {
             match self.serial.next() {
                 Some(Ok(input)) => {
-                    dbg!(&input);
                     self.update_repeat_tracker(&input);
                     self.set_held_codes(&input);
                     if !input.release {
                         if let Some((cmd, bind)) = self.lookup_pressed(input.code) {
                             self.set_invalid_commands(&input, &cmd);
                             self.execute_bind_down(msgs, &cmd, bind, input.reverse);
-                            // if self.held_actions.contains_key(&cmd) {
-                            // } else {
-                            //     debug!(target: "engine", "{cmd} -> ignored bare release");
-                            // }
                         } else {
                             debug!(target: "engine", "{input} -> no binding for code");
                         }
                     } else {
                         let released: Vec<_> = self.lookup_released().collect();
                         for (cmd, bind) in released.iter() {
-                            // let action_opt = self.held_actions.remove(&cmd);
-                            // if let Entry::Occupied(_) = entry {
-                            //     debug!(target: "engine", "{cmd} -> ignored duplicate");
-                            //     break;
-                            // }
-                            // entry.or_insert(None);
                             self.execute_bind_up(msgs, &cmd, &bind);
-                            // if action_opt.is_some() {
-                            // } else {
-                            //     debug!(target: "engine", "{cmd} -> ignored bare release");
-                            // }
                             if let Some(c) = self.held_actions.remove(&cmd) {
                                 panic!("held command {c:?} should have been emptied by this point");
                             };
@@ -963,7 +906,6 @@ impl Engine {
                         }
                     }
                     self.release_invalid_commands(&input);
-                    dbg!(&self.held_actions);
                 }
                 Some(Err(ref err)) if would_block(err) => break,
                 Some(Err(err)) => panic!("{}", err),
