@@ -386,7 +386,7 @@ pub enum Combi {
     On,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Bind {
     Button(Rc<Action>, Combi),
     ButtonUp(Rc<Action>),

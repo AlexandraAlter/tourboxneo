@@ -228,7 +228,9 @@ pub struct Engine {
     /// Tracks how many times a code has been pressed in a certain window
     repeat_tracker: HashMap<Code, RepeatTracker>,
     /// Held commands, used to track invalidation and ensure actions are released
-    held_commands: HashMap<Command, Option<Rc<Action>>>,
+    held_actions: HashMap<Command, Rc<Action>>,
+    /// Held binds, used for released codes
+    held_binds: HashMap<Command, Rc<Bind>>,
     /// Invalidated codes, subsets of this will not fire when released if :up is set
     invalidated_commands: Vec<Command>,
     /// Tickers for each dial
@@ -261,7 +263,8 @@ impl Engine {
             layer: None,
             held_codes: Vec::new(),
             repeat_tracker: HashMap::new(),
-            held_commands: HashMap::new(),
+            held_actions: HashMap::new(),
+            held_binds: HashMap::new(),
             invalidated_commands: Vec::new(),
             dial_ticks: Tickers::new(),
             macro_group_ticks: HashMap::new(),
@@ -334,7 +337,7 @@ impl Engine {
             // TODO make sure this handles okay on release, and test thoroughly
             _ => fallbacks
                 .iter()
-                .filter(|c| self.held_commands.get(&Command::Simple(**c)).is_none())
+                .filter(|c| self.held_binds.get(&Command::Simple(**c)).is_none())
                 .cloned()
                 .collect(),
         }
@@ -346,6 +349,7 @@ impl Engine {
     }
 
     /// Lookup a simple code
+    // TODO make this an iterator?
     fn lookup_simple<N>(
         &self,
         layer: &Layer<N, Rc<CustomCode>, Rc<Bind>>,
@@ -417,6 +421,7 @@ impl Engine {
     /// Lookup the fallback code for a given layer and code
     /// If a non-fallback code is present, this method won't return it.
     /// Call `lookup_simple` first.
+    // TODO make this an iterator
     fn lookup_fallback<N>(
         &self,
         layer: &Layer<N, Rc<CustomCode>, Rc<Bind>>,
@@ -432,6 +437,7 @@ impl Engine {
     /// Lookup whether currently executing a custom bind
     /// If a non-custom code is present, this method won't return it.
     /// Call `lookup_simple` or `lookup_fallback` first.
+    // TODO make this an iterator
     fn lookup_custom<N>(
         &self,
         layer: &Layer<N, Rc<CustomCode>, Rc<Bind>>,
@@ -454,7 +460,8 @@ impl Engine {
     }
 
     /// Lookup a code using sensible fallbacks. Handles custom commands, simple commands, and fallbacks.
-    fn lookup(&self, code: Code) -> Option<(Command, Rc<Bind>)> {
+    // TODO make this an iterator
+    fn lookup_pressed(&self, code: Code) -> Option<(Command, Rc<Bind>)> {
         match self.layer.as_ref() {
             Some(l) => {
                 let layer = &self.config.layers.get(l).expect("layer should exist");
@@ -473,15 +480,20 @@ impl Engine {
     }
 
     /// Lookup whether we're releasing something already held
-    fn lookup_held(&self, code: Code) -> Option<(Command, Rc<Action>)> {
-        self.held_commands
+    fn lookup_released(&self) -> impl Iterator<Item = (Command, Rc<Bind>)> {
+        dbg!(&self.held_codes);
+        self.held_binds
             .iter()
-            .find(|(c, a)| {
-                (c.into_single_code() == Some(code)
-                    || c.into_multiple_codes() == Some(&self.held_codes))
-                    && a.is_some()
+            .filter(move |(cmd, _b)| {
+                if let Some(code) = cmd.into_single_code() {
+                    !self.held_codes.contains(&code)
+                } else if let Some(codes) = cmd.into_multiple_codes() {
+                    !codes.iter().any(|c| !self.held_codes.contains(c))
+                } else {
+                    true
+                }
             })
-            .map(|(c, a)| (c.clone(), a.as_ref().unwrap().clone()))
+            .map(|(c, b)| (c.clone(), b.clone()))
     }
 
     /// Append or set modifiers (and related keys)
@@ -506,16 +518,14 @@ impl Engine {
     /// Re-instates the modifiers of all held actions, which get clobbered by any non-:combi bind
     fn resume_held_commands(&mut self) {
         let actions = self
-            .held_commands
+            .held_actions
             .iter_mut()
             .map(|(cmd, action)| (cmd.clone(), action.clone()))
             .collect::<Vec<_>>();
-        for (cmd, action_opt) in actions.into_iter() {
-            action_opt.map(|action| {
-                action.mods().map(|m| {
-                    debug!(target: "engine", "{cmd} (resume mods) -> {action}");
-                    self.mods_down(m, Combi::On)
-                })
+        for (cmd, action) in actions.into_iter() {
+            action.mods().map(|m| {
+                debug!(target: "engine", "{cmd} (resume mods) -> {action}");
+                self.mods_down(m, Combi::On)
             });
         }
     }
@@ -529,12 +539,12 @@ impl Engine {
         combi: Combi,
     ) {
         if !cmd.can_ignore() {
-            if let Some(Some(prev_action)) = self.held_commands.get(cmd) {
+            if let Some(prev_action) = self.held_actions.get(cmd) {
                 // we've changed layer, release the old action
-                info!(target: "engine", "{cmd} (down) -> cleanup({prev_action})");
-                self.execute_action_up(msgs, cmd, prev_action.clone());
+                info!(target: "engine", "{cmd} (down) -> clobbering cleanup({prev_action})");
+                self.execute_action_up(msgs, cmd, None);
             }
-            self.held_commands.insert(cmd.clone(), Some(action.clone()));
+            self.held_actions.insert(cmd.clone(), action.clone());
         }
 
         match &*action {
@@ -586,7 +596,7 @@ impl Engine {
                 let macro_actions = r#macro.actions.to_owned();
                 for macro_action in macro_actions {
                     self.execute_action_down(msgs, &Command::Macro, macro_action.clone(), combi);
-                    self.execute_action_up(msgs, &Command::Macro, macro_action.clone());
+                    self.execute_action_up(msgs, &Command::Macro, Some(macro_action.clone()));
                 }
             }
             Action::MacroGroup(name) => {
@@ -605,7 +615,7 @@ impl Engine {
                 let actions = group.expect("macro group index should be in of bounds").to_owned();
                 for macro_action in actions {
                     self.execute_action_down(msgs, &Command::Macro, macro_action.clone(), combi);
-                    self.execute_action_up(msgs, &Command::Macro, macro_action.clone());
+                    self.execute_action_up(msgs, &Command::Macro, Some(macro_action.clone()));
                 }
             }
             Action::Menu(name) => {
@@ -645,27 +655,41 @@ impl Engine {
         };
     }
 
-    /// Given a command and action, remove it from the held list, execute the action's release, restore held modifiers
-    fn execute_action_up(&mut self, msgs: &mut EngineCmds, cmd: &Command, action: Rc<Action>) {
-        if !cmd.can_ignore() {
-            if let Some(Some(prev_action)) = self.held_commands.get(cmd) {
-                if *prev_action != action {
-                    // we've changed layer, release the old action instead
-                    warn!(target: "engine", "{cmd} (up) -> late cleanup({prev_action})");
-                    self.execute_action_up(msgs, cmd, prev_action.clone());
-                    return;
-                }
-            } else {
-                info!(target: "engine", "{cmd} (up) -> ignored");
-                return;
+    /// Given a command, remove its action from the held list, execute the action's release, restore held modifiers
+    /// Only supply an `action` if `cmd` is a dummy command (shortcut, macro, menu)
+    fn execute_action_up(
+        &mut self,
+        msgs: &mut EngineCmds,
+        cmd: &Command,
+        action: Option<Rc<Action>>,
+    ) {
+        let action = if cmd.can_ignore() {
+            action.expect("action should be provided by the caller")
+        } else {
+            if action.is_some() {
+                panic!("action should not be provided by the caller");
             }
-            self.held_commands.insert(cmd.clone(), None);
-        }
+            self.held_actions.remove(cmd).expect("action should be present in held_actions")
+        };
+        // if !cmd.can_ignore() {
+        //     if let Some(prev_action) = self.held_actions.get(cmd) {
+        //         if *prev_action != action {
+        //             // we've changed layer, release the old action instead
+        //             warn!(target: "engine", "{cmd} (up) -> late cleanup({prev_action})");
+        //             self.execute_action_up(msgs, cmd, prev_action.clone());
+        //             return;
+        //         }
+        //     } else {
+        //         info!(target: "engine", "{cmd} (up) -> ignored");
+        //         return;
+        //     }
+        //     self.held_actions.insert(cmd.clone(), None);
+        // }
 
         match &*action {
             Action::None => {}
             Action::Mod(mods) => {
-                self.mods_up(mods);
+                self.mods_up(&mods);
             }
             Action::Key(key_code, mods) => {
                 self.output.key_release(*key_code);
@@ -695,7 +719,7 @@ impl Engine {
                 } else {
                     shortcut.action.clone()
                 };
-                self.execute_action_up(msgs, &Command::Shortcut, action);
+                self.execute_action_up(msgs, &Command::Shortcut, Some(action));
             }
             Action::Macro(_) => {}
             Action::MacroGroup(_) => {}
@@ -707,79 +731,97 @@ impl Engine {
     }
 
     /// Given a command and binding, optionally run some actions
-    fn execute_bind(&mut self, msgs: &mut EngineCmds, input: &Input, cmd: &Command, bind: &Bind) {
-        match bind {
+    fn execute_bind_down(
+        &mut self,
+        msgs: &mut EngineCmds,
+        cmd: &Command,
+        bind: Rc<Bind>,
+        reverse: bool,
+    ) {
+        if self.held_binds.contains_key(&cmd) {
+            debug!(target: "engine", "{cmd} -> {bind} ignored duplicate");
+            return;
+        }
+
+        self.held_binds.insert(cmd.clone(), bind.clone());
+
+        match &*bind {
             Bind::Button(action, combi) => {
-                if !input.release {
-                    info!(target: "engine", "{cmd} -> {bind}:down({action})");
-                    self.execute_action_down(msgs, cmd, action.clone(), *combi);
-                } else {
-                    info!(target: "engine", "{cmd} -> {bind}:up({action})");
-                    self.execute_action_up(msgs, cmd, action.clone());
-                }
+                info!(target: "engine", "{cmd} -> {bind}:down({action})");
+                self.execute_action_down(msgs, cmd, action.clone(), *combi);
             }
-            Bind::ButtonUp(action) => {
-                if input.release && !self.is_command_invalidated(&cmd) {
-                    info!(target: "engine", "{cmd} -> {bind}({action})");
-                    self.execute_action_down(msgs, cmd, action.clone(), Combi::Off);
-                    self.execute_action_up(msgs, cmd, action.clone());
-                }
-            }
+            Bind::ButtonUp(_action) => {}
             Bind::ButtonRepeat(action, combi) => {
-                if !input.release {
-                    info!(target: "engine", "{cmd} -> {bind}:down({action})");
-                    self.execute_action_down(msgs, cmd, action.clone(), *combi);
-                    self.timer.set_timeout(&Duration::from_millis(100)).unwrap();
-                } else {
-                    info!(target: "engine", "{cmd} -> {bind}:up({action})");
-                    self.execute_action_up(msgs, cmd, action.clone());
-                    self.timer.disarm().unwrap();
-                }
+                info!(target: "engine", "{cmd} -> {bind}:down({action})");
+                self.execute_action_down(msgs, cmd, action.clone(), *combi);
+                self.timer.set_timeout(&Duration::from_millis(100)).unwrap();
             }
-            Bind::ButtonAB(action_a, action_b) => {
-                if !input.release {
-                    info!(target: "engine", "{cmd} -> {bind}:A({action_a})");
-                    self.execute_action_down(msgs, cmd, action_a.clone(), Combi::Off);
-                    self.execute_action_up(msgs, cmd, action_a.clone());
-                } else {
-                    info!(target: "engine", "{cmd} -> {bind}:B({action_b})");
-                    self.execute_action_down(msgs, cmd, action_b.clone(), Combi::Off);
-                    self.execute_action_up(msgs, cmd, action_b.clone());
-                }
+            Bind::ButtonAB(action_a, _action_b) => {
+                info!(target: "engine", "{cmd} -> {bind}:A({action_a})");
+                self.execute_action_down(msgs, cmd, action_a.clone(), Combi::Off);
+                self.execute_action_up(msgs, cmd, None);
             }
             Bind::Scroll { fwd, bak, rate } => {
-                if !input.release {
-                    let (counter, counter_rev) = match cmd {
-                        Command::Simple(code) => self.dial_ticks.get(*code, input.reverse),
-                        Command::Custom(custom_cmd) => match &**custom_cmd {
-                            // TODO test both of these
-                            CustomCode::Series(_, _) => {
-                                todo!("custom binds cannot be scrolled yet")
-                            }
-                            CustomCode::Parallel(codes) => {
-                                let code = codes
-                                    .iter()
-                                    .filter_map(|c| c.to_scroll_trio())
-                                    .nth(0)
-                                    .expect("parallel command should have one scrollable code");
-                                self.dial_ticks.get(code, input.reverse)
-                            }
-                        },
-                        _ => panic!("scrolled something that should not scroll"),
-                    };
-                    *counter = counter.wrapping_add(1);
-                    *counter_rev = 0;
-                    if *counter % rate.speed() == 0 {
-                        self.dial_ticks.clear();
-                        let action = if input.reverse { bak } else { fwd };
-                        if !input.release {
-                            info!(target: "engine", "{cmd} -> {bind}({action})");
-                            self.execute_action_down(msgs, cmd, action.clone(), Combi::Off);
-                            self.execute_action_up(msgs, cmd, action.clone());
+                let (counter, counter_rev) = match cmd {
+                    Command::Simple(code) => self.dial_ticks.get(*code, reverse),
+                    Command::Custom(custom_cmd) => match &**custom_cmd {
+                        // TODO test both of these
+                        CustomCode::Series(_, _) => {
+                            todo!("custom binds cannot be scrolled yet")
                         }
-                    }
+                        CustomCode::Parallel(codes) => {
+                            let code = codes
+                                .iter()
+                                .filter_map(|c| c.to_scroll_trio())
+                                .nth(0)
+                                .expect("parallel command should have one scrollable code");
+                            self.dial_ticks.get(code, reverse)
+                        }
+                    },
+                    _ => panic!("scrolled something that should not scroll"),
+                };
+                *counter = counter.wrapping_add(1);
+                *counter_rev = 0;
+                if *counter % rate.speed() == 0 {
+                    self.dial_ticks.clear();
+                    let action = if reverse { bak } else { fwd };
+                    info!(target: "engine", "{cmd} -> {bind}({action})");
+                    self.execute_action_down(msgs, cmd, action.clone(), Combi::Off);
+                    self.execute_action_up(msgs, cmd, None);
                 }
             }
+        }
+    }
+
+    /// Given a command and binding, optionally run some actions
+    fn execute_bind_up(&mut self, msgs: &mut EngineCmds, cmd: &Command, bind: &Bind) {
+        if let None = self.held_binds.remove(&cmd) {
+            error!(target: "engine", "{cmd} -> {bind} went missing from held_binds");
+        }
+
+        match bind {
+            Bind::Button(action, _combi) => {
+                info!(target: "engine", "{cmd} -> {bind}:up({action})");
+                self.execute_action_up(msgs, cmd, None);
+            }
+            Bind::ButtonUp(action) => {
+                if !self.is_command_invalidated(&cmd) {
+                    info!(target: "engine", "{cmd} -> {bind}({action})");
+                    self.execute_action_down(msgs, cmd, action.clone(), Combi::Off);
+                    self.execute_action_up(msgs, cmd, None);
+                }
+            }
+            Bind::ButtonRepeat(action, _combi) => {
+                info!(target: "engine", "{cmd} -> {bind}:up({action})");
+                self.execute_action_up(msgs, cmd, None);
+                self.timer.disarm().unwrap();
+            }
+            Bind::ButtonAB(_action_a, action_b) => {
+                info!(target: "engine", "{cmd} -> {bind}:B({action_b})");
+                self.execute_action_down(msgs, cmd, action_b.clone(), Combi::Off);
+                self.execute_action_up(msgs, cmd, None);
+            }
+            Bind::Scroll { fwd: _fwd, bak: _bak, rate: _rate } => {}
         }
     }
 
@@ -794,6 +836,12 @@ impl Engine {
                 }
             }
             self.held_codes.sort();
+        } else {
+            self.held_codes.retain(|c| {
+                *c != input.code
+                    && Some(*c) != input.code.dedup()
+                    && Some(*c) != input.code.to_scroll_trio()
+            });
         }
     }
 
@@ -804,7 +852,7 @@ impl Engine {
         if !input.release {
             if cmd.into_multiple_codes().is_some() {
                 let mut invalid_cmds: Vec<_> = self
-                    .held_commands
+                    .held_binds
                     .keys()
                     .filter(|held_cmd| {
                         held_cmd.is_subset(cmd) && !self.invalidated_commands.contains(held_cmd)
@@ -817,13 +865,34 @@ impl Engine {
     }
 
     /// release any code that's no longer held and release invalidated commands that no longer apply
-    fn release_held_codes_or_commands(&mut self, input: &Input) {
+    fn release_invalid_commands(&mut self, input: &Input) {
         if input.release {
-            self.held_codes.retain(|c| {
-                *c != input.code
-                    && Some(*c) != input.code.dedup()
-                    && Some(*c) != input.code.to_scroll_trio()
-            });
+            // TODO move this
+            // let released_cmds: Vec<_> = self
+            //     .held_actions
+            //     .keys()
+            //     .filter(|cmd| {
+            //         if let Some(code) = cmd.into_single_code() {
+            //             !self.held_codes.contains(&code)
+            //         } else if let Some(codes) = cmd.into_multiple_codes() {
+            //             !codes.iter().any(|c| self.held_codes.contains(c))
+            //         } else {
+            //             false
+            //         }
+            //     })
+            //     .cloned()
+            //     .collect();
+            // for cmd in released_cmds {
+            //     let prev_action_opt =
+            //         self.held_actions.get(&cmd).expect("cmd should exist in held_commands");
+            //     if let Some(prev_action) = prev_action_opt {
+            //         info!(target: "engine", "{cmd} (up) -> late cleanup({prev_action})");
+            //         self.execute_action_up(msgs, &cmd, prev_action.clone());
+            //     }
+            //     if let Some(Some(c)) = self.held_actions.remove(&cmd) {
+            //         panic!("held command {c:?} should have been emptied by this point");
+            //     };
+            // }
 
             // An invalidated command can be released if all of its component inputs are released
             self.invalidated_commands.retain(|invalid_cmd| {
@@ -857,41 +926,44 @@ impl Engine {
         loop {
             match self.serial.next() {
                 Some(Ok(input)) => {
+                    dbg!(&input);
                     self.update_repeat_tracker(&input);
                     self.set_held_codes(&input);
-                    if input.release
-                        && let Some((cmd, prev_action)) = self.lookup_held(input.code)
-                    {
-                        info!(target: "engine", "{cmd} (up) -> early cleanup({prev_action})");
-                        self.execute_action_up(msgs, &cmd, prev_action);
-                        if let Some(Some(c)) = self.held_commands.remove(&cmd) {
-                            panic!("held command {c:?} should have been emptied by this point");
-                        };
-                    }
-                    if let Some((cmd, bind)) = self.lookup(input.code) {
-                        self.set_invalid_commands(&input, &cmd);
-                        if !input.release {
-                            let entry = self.held_commands.entry(cmd.clone());
-                            if let Entry::Occupied(_) = entry {
-                                debug!(target: "engine", "{cmd} -> ignored duplicate");
-                                break;
-                            }
-                            entry.or_insert(None);
-                        }
-                        if self.held_commands.contains_key(&cmd) {
-                            self.execute_bind(msgs, &input, &cmd, &bind);
+                    if !input.release {
+                        if let Some((cmd, bind)) = self.lookup_pressed(input.code) {
+                            self.set_invalid_commands(&input, &cmd);
+                            self.execute_bind_down(msgs, &cmd, bind, input.reverse);
+                            // if self.held_actions.contains_key(&cmd) {
+                            // } else {
+                            //     debug!(target: "engine", "{cmd} -> ignored bare release");
+                            // }
                         } else {
-                            debug!(target: "engine", "{cmd} -> ignored bare release");
+                            debug!(target: "engine", "{input} -> no binding for code");
                         }
-                        if input.release {
-                            if let Some(Some(c)) = self.held_commands.remove(&cmd) {
+                    } else {
+                        let released: Vec<_> = self.lookup_released().collect();
+                        for (cmd, bind) in released.iter() {
+                            // let action_opt = self.held_actions.remove(&cmd);
+                            // if let Entry::Occupied(_) = entry {
+                            //     debug!(target: "engine", "{cmd} -> ignored duplicate");
+                            //     break;
+                            // }
+                            // entry.or_insert(None);
+                            self.execute_bind_up(msgs, &cmd, &bind);
+                            // if action_opt.is_some() {
+                            // } else {
+                            //     debug!(target: "engine", "{cmd} -> ignored bare release");
+                            // }
+                            if let Some(c) = self.held_actions.remove(&cmd) {
                                 panic!("held command {c:?} should have been emptied by this point");
                             };
                         }
-                    } else {
-                        debug!(target: "engine", "{input} -> no binding for code");
+                        if released.is_empty() {
+                            debug!(target: "engine", "{input} -> no binding for code");
+                        }
                     }
-                    self.release_held_codes_or_commands(&input);
+                    self.release_invalid_commands(&input);
+                    dbg!(&self.held_actions);
                 }
                 Some(Err(ref err)) if would_block(err) => break,
                 Some(Err(err)) => panic!("{}", err),
@@ -916,7 +988,7 @@ impl Engine {
             Some(action) => {
                 info!(target: "engine", "{} -> bind {}", Command::Menu, action);
                 self.execute_action_down(msgs, &Command::Menu, action.clone(), Combi::Off);
-                self.execute_action_up(msgs, &Command::Menu, action.clone());
+                self.execute_action_up(msgs, &Command::Menu, Some(action.clone()));
             }
             None => info!(target: "engine", "menu aborted"),
         }
@@ -967,10 +1039,11 @@ impl Engine {
             if !self.invalidated_commands.is_empty() {
                 error!(target: "engine", "no codes are held, but an invalidated code is still held:\n{:?}", &self.invalidated_commands);
             }
-            if !self.held_commands.is_empty() {
-                error!(target: "engine", "no codes are held, but a command is still held:\n{:?}", &self.held_commands);
-            }
-            if self.output.held_keys_count() > 0 {
+            if !self.held_binds.is_empty() {
+                error!(target: "engine", "no codes are held, but a bind is still held:\n{:?}\n{:?}\n{:?}", &self.held_binds, &self.held_actions, &self.output.held_keys());
+            } else if !self.held_actions.is_empty() {
+                error!(target: "engine", "no codes are held, but a command is still held:\n{:?}\n{:?}", &self.held_actions, &self.output.held_keys());
+            } else if self.output.held_keys_count() > 0 {
                 error!(target: "engine", "no codes are held, but the output still has keys:\n{:?}", &self.output.held_keys());
             }
         }
